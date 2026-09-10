@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -10,6 +11,7 @@ namespace CrmDemo
     /// コマンドライン（引数あり起動）
     /// ・検索: 顧客名・会社名・電話番号で検索し、対応履歴をCSVで標準出力する
     /// ・登録（--add）: 特定した顧客に問い合わせ内容・対応内容・次回確認内容を登録する（通話後の自動転記）
+    /// ・実行ごとに crm_log.txt へ1行ログを残す
     /// </summary>
     public static class Cli
     {
@@ -26,6 +28,14 @@ namespace CrmDemo
         {
             public string Inquiry = "", Response = "", Next = "", Staff = "", Email = "", DateText = "", NextDateText = "";
             public bool Done, Create, Given;
+        }
+
+        /// <summary>1回の実行の情報（ログ用）</summary>
+        class RunInfo
+        {
+            public string Mode = "search", Detail = "", LogPath, DataPath;
+            public bool NoLog;
+            public Encoding Enc;
         }
 
         /// <summary>指定顧客の対応履歴CSV（対応日の昇順）。GUIの「連携CSV出力プレビュー」「連携検索テスト」でも同じものを使う。</summary>
@@ -117,12 +127,18 @@ namespace CrmDemo
 "  ・同じ顧客・対応日・問い合わせ内容・対応内容の履歴があれば二重登録しません。\r\n" +
 "  ・値の中の \\n は改行として扱います。GUIを開いていれば自動で画面に反映されます。\r\n" +
 "\r\n" +
+"■ ログ\r\n" +
+"  実行するたびに、データファイルと同じフォルダの " + RunLog.FileName + " に1行追記します。\r\n" +
+"  （日時・処理・終了コード・処理時間・結果・引数。タブ区切り、UTF-8。5MBを超えると .1 に切り替え）\r\n" +
+"      --log <ファイル>      ログの保存先（環境変数 CRM_LOG でも可）\r\n" +
+"      --no-log              ログを出力しない（CRM_LOG=off でも可）\r\n" +
+"\r\n" +
 "■ その他のオプション\r\n" +
 "  -p, --partial            顧客名を部分一致で検索する\r\n" +
 "  -f, --full               顧客ID・顧客名・会社名・電話番号・メール・次回確認日・担当者・状態の列も出力\r\n" +
 "      --no-header          見出し行を出力しない\r\n" +
-"  -e, --encoding <名前>    出力文字コード: utf8（既定）/ utf8bom / sjis\r\n" +
-"                           ※ パイプ・リダイレクト時の既定はBOMなしUTF-8。\r\n" +
+"  -e, --encoding <名前>    標準出力・標準エラー出力の文字コード: utf8（既定）/ utf8bom / sjis\r\n" +
+"                           ※ パイプ・リダイレクト時の既定はBOMなしUTF-8（標準エラー出力にBOMは付けません）。\r\n" +
 "                             Windows PowerShell 5.1 で変数に受ける場合などは sjis を指定。\r\n" +
 "      --all                全顧客の対応履歴を出力（--full 形式）\r\n" +
 "      --list               顧客一覧をCSVで出力\r\n" +
@@ -131,7 +147,7 @@ namespace CrmDemo
 "  -h, --help               このヘルプを表示\r\n" +
 "\r\n" +
 "■ 終了コード\r\n" +
-"  0 = 該当あり・登録完了 / 1 = 該当なし / 2 = 顧客が複数該当（登録時） / 9 = エラー\r\n" +
+"  0 = 該当あり・登録完了 / 1 = 該当なし / 2 = 顧客が複数該当（登録時） / 9 = エラー（標準エラー出力にメッセージ）\r\n" +
 "\r\n" +
 "■ 例\r\n" +
 "  " + exe + " \"山田 太郎\"\r\n" +
@@ -189,125 +205,179 @@ namespace CrmDemo
             s.Flush();
         }
 
+        /// <summary>
+        /// 標準エラー出力へ書く。標準出力と同じ文字コード（既定UTF-8、--encoding sjis で Shift_JIS）にそろえる。
+        /// コンソール表示時は画面の文字コードのまま出す。BOM は付けない。
+        /// </summary>
+        static void WriteErr(string text, Encoding enc)
+        {
+            if (enc == null && !Console.IsErrorRedirected)
+            {
+                Console.Error.Write(text);
+                Console.Error.Flush();
+                return;
+            }
+            if (enc == null || enc is UTF8Encoding) enc = new UTF8Encoding(false);
+            var s = Console.OpenStandardError();
+            byte[] b = enc.GetBytes(text);
+            s.Write(b, 0, b.Length);
+            s.Flush();
+        }
+
         public static int Run(string[] args)
         {
+            var sw = Stopwatch.StartNew();
+            var info = new RunInfo();
+            int code;
             try
             {
-                bool full = false, header = true, list = false, all = false, rest = false, add = false;
-                string dataPath = null, importFile = null;
-                Encoding enc = null;
-                var names = new List<string>();
-                var query = new SearchQuery();
-                var ad = new AddArgs();
-
-                for (int i = 0; i < args.Length; i++)
-                {
-                    string a = args[i];
-                    if (rest) { names.Add(a); continue; }
-                    switch (a.ToLowerInvariant())
-                    {
-                        case "-h": case "--help": case "/?": case "-?": case "/h":
-                            Write(HelpText(), enc); return ExitFound;
-                        case "-p": case "--partial": query.Partial = true; break;
-                        case "-f": case "--full": full = true; break;
-                        case "--no-header": header = false; break;
-                        case "--list": list = true; break;
-                        case "--all": all = true; break;
-                        case "-n": case "--name": query.Names.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
-                        case "-c": case "--company": query.Companies.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
-                        case "-t": case "--phone": case "--tel": query.Phones.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
-                        case "-a": case "--any": query.Anys.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
-                        case "--id":
-                            foreach (var v in SearchQuery.Split(NextArg(args, ref i, a)))
-                            {
-                                int id;
-                                if (!int.TryParse(v, out id)) throw new CliError("顧客IDは数字で指定してください: " + v);
-                                query.Ids.Add(id);
-                            }
-                            break;
-                        case "--add": add = true; break;
-                        case "--inquiry": ad.Inquiry = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
-                        case "--response": ad.Response = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
-                        case "--next": ad.Next = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
-                        case "--date": ad.DateText = NextArg(args, ref i, a); ad.Given = true; break;
-                        case "--next-date": ad.NextDateText = NextArg(args, ref i, a); ad.Given = true; break;
-                        case "--staff": ad.Staff = NextArg(args, ref i, a).Trim(); ad.Given = true; break;
-                        case "--email": ad.Email = NextArg(args, ref i, a).Trim(); ad.Given = true; break;
-                        case "--done": ad.Done = true; ad.Given = true; break;
-                        case "--create": ad.Create = true; ad.Given = true; break;
-                        case "-e": case "--encoding": enc = ParseEncoding(NextArg(args, ref i, a)); break;
-                        case "--data": dataPath = NextArg(args, ref i, a); break;
-                        case "--import": importFile = NextArg(args, ref i, a); break;
-                        case "--": rest = true; break;
-                        default:
-                            if (a.StartsWith("--")) throw new CliError("不明なオプション: " + a + "（--help で使い方を表示）");
-                            names.Add(a); break;
-                    }
-                }
-                // オプションなしの引数は空白でつないで1つの顧客名（"山田 太郎" と 山田 太郎 を同じに扱う）
-                query.Names.AddRange(SearchQuery.Split(string.Join(" ", names)));
-                if (ad.Given && !add) throw new CliError("--inquiry / --response / --next などは --add と一緒に指定してください");
-
-                var store = new CrmStore(dataPath ?? CrmStore.ResolveDefaultPath());
-
-                if (add) return RunAdd(store, query, ad, enc);
-
-                if (importFile != null)
-                {
-                    if (!File.Exists(importFile)) throw new CliError("ファイルが見つかりません: " + importFile);
-                    var parsed = Importer.Parse(Csv.ReadTextFile(importFile));
-                    var work = store.Data.Clone();
-                    var res = Importer.Apply(work, parsed.Rows, null);
-                    if (res.HasChanges) store.ReplaceData(work);
-                    var sb = new StringBuilder();
-                    sb.AppendLine(res.Summary);
-                    for (int r = 0; r < parsed.Rows.Count; r++)
-                        if (res.RowStatus[r].StartsWith("エラー"))
-                            sb.AppendLine(string.Format("  {0}行目: {1}", parsed.Rows[r].LineNo, res.RowStatus[r]));
-                    Write(sb.ToString(), enc);
-                    return res.Errors > 0 ? ExitError : ExitFound;
-                }
-
-                if (list)
-                {
-                    string cl = BuildCustomerCsv(store.Data);
-                    Write(header ? cl : StripHeader(cl), enc);
-                    return store.Data.Customers.Count > 0 ? ExitFound : ExitNotFound;
-                }
-
-                List<Customer> targets;
-                if (all) { targets = store.Data.Customers.ToList(); full = true; }
-                else
-                {
-                    if (query.IsEmpty)
-                        throw new CliError("検索条件（顧客名 / --name / --company / --phone / --any / --id）を指定してください（--help で使い方を表示）");
-                    targets = store.Data.Search(query);
-                }
-
-                int count;
-                string csv = BuildHistoryCsv(store.Data, targets, full, header, out count);
-                if (count == 0)
-                {
-                    Write(NotFoundMessage + "\r\n", enc);
-                    return ExitNotFound;
-                }
-                Write(csv, enc);
-                return ExitFound;
-            }
-            catch (CliError ex)
-            {
-                Console.Error.WriteLine("エラー: " + ex.Message);
-                return ExitError;
+                code = RunCore(args, info);
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine("エラー: " + ex.Message);
-                return ExitError;
+                info.Detail = "エラー: " + ex.Message;
+                try { WriteErr("エラー: " + ex.Message + "\r\n", info.Enc); } catch { }
+                code = ExitError;
             }
+            if (info.Mode != "help" && !info.NoLog)
+            {
+                string path = RunLog.ResolvePath(info.LogPath, info.DataPath);
+                if (path != null)
+                    RunLog.Append(path, RunLog.Format(DateTime.Now, info.Mode, code, sw.ElapsedMilliseconds, info.Detail, args));
+            }
+            return code;
+        }
+
+        static int RunCore(string[] args, RunInfo info)
+        {
+            // 文字コードとログの設定は、引数の解析エラーのメッセージ・ログにも使うので先に読む
+            for (int i = 0; i < args.Length; i++)
+            {
+                string k = args[i].ToLowerInvariant();
+                if (k == "--no-log") info.NoLog = true;
+                if (i + 1 >= args.Length) continue;
+                if (k == "--log") info.LogPath = args[i + 1];
+                else if (k == "--data") info.DataPath = args[i + 1];
+                else if (k == "-e" || k == "--encoding") info.Enc = ParseEncoding(args[i + 1]);
+            }
+
+            bool full = false, header = true, list = false, all = false, rest = false, add = false;
+            string importFile = null;
+            Encoding enc = info.Enc;
+            var names = new List<string>();
+            var query = new SearchQuery();
+            var ad = new AddArgs();
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i];
+                if (rest) { names.Add(a); continue; }
+                switch (a.ToLowerInvariant())
+                {
+                    case "-h": case "--help": case "/?": case "-?": case "/h":
+                        info.Mode = "help";
+                        Write(HelpText(), enc); return ExitFound;
+                    case "-p": case "--partial": query.Partial = true; break;
+                    case "-f": case "--full": full = true; break;
+                    case "--no-header": header = false; break;
+                    case "--list": list = true; break;
+                    case "--all": all = true; break;
+                    case "-n": case "--name": query.Names.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
+                    case "-c": case "--company": query.Companies.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
+                    case "-t": case "--phone": case "--tel": query.Phones.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
+                    case "-a": case "--any": query.Anys.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
+                    case "--id":
+                        foreach (var v in SearchQuery.Split(NextArg(args, ref i, a)))
+                        {
+                            int id;
+                            if (!int.TryParse(v, out id)) throw new CliError("顧客IDは数字で指定してください: " + v);
+                            query.Ids.Add(id);
+                        }
+                        break;
+                    case "--add": add = true; break;
+                    case "--inquiry": ad.Inquiry = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
+                    case "--response": ad.Response = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
+                    case "--next": ad.Next = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
+                    case "--date": ad.DateText = NextArg(args, ref i, a); ad.Given = true; break;
+                    case "--next-date": ad.NextDateText = NextArg(args, ref i, a); ad.Given = true; break;
+                    case "--staff": ad.Staff = NextArg(args, ref i, a).Trim(); ad.Given = true; break;
+                    case "--email": ad.Email = NextArg(args, ref i, a).Trim(); ad.Given = true; break;
+                    case "--done": ad.Done = true; ad.Given = true; break;
+                    case "--create": ad.Create = true; ad.Given = true; break;
+                    case "-e": case "--encoding": NextArg(args, ref i, a); break;   // 先読み済み
+                    case "--data": NextArg(args, ref i, a); break;                   // 先読み済み
+                    case "--log": NextArg(args, ref i, a); break;                    // 先読み済み
+                    case "--no-log": break;
+                    case "--import": importFile = NextArg(args, ref i, a); break;
+                    case "--": rest = true; break;
+                    default:
+                        if (a.StartsWith("--")) throw new CliError("不明なオプション: " + a + "（--help で使い方を表示）");
+                        names.Add(a); break;
+                }
+            }
+            // オプションなしの引数は空白でつないで1つの顧客名（"山田 太郎" と 山田 太郎 を同じに扱う）
+            query.Names.AddRange(SearchQuery.Split(string.Join(" ", names)));
+            if (ad.Given && !add) throw new CliError("--inquiry / --response / --next などは --add と一緒に指定してください");
+
+            if (add) info.Mode = "add";
+            else if (importFile != null) info.Mode = "import";
+            else if (list) info.Mode = "list";
+            else if (all) info.Mode = "all";
+
+            var store = new CrmStore(info.DataPath ?? CrmStore.ResolveDefaultPath());
+            info.DataPath = store.FilePath;
+
+            if (add) return RunAdd(store, query, ad, enc, info);
+
+            if (importFile != null)
+            {
+                if (!File.Exists(importFile)) throw new CliError("ファイルが見つかりません: " + importFile);
+                var parsed = Importer.Parse(Csv.ReadTextFile(importFile));
+                var work = store.Data.Clone();
+                var res = Importer.Apply(work, parsed.Rows, null);
+                if (res.HasChanges) store.ReplaceData(work);
+                var sb = new StringBuilder();
+                sb.AppendLine(res.Summary);
+                for (int r = 0; r < parsed.Rows.Count; r++)
+                    if (res.RowStatus[r].StartsWith("エラー"))
+                        sb.AppendLine(string.Format("  {0}行目: {1}", parsed.Rows[r].LineNo, res.RowStatus[r]));
+                Write(sb.ToString(), enc);
+                info.Detail = res.Summary;
+                return res.Errors > 0 ? ExitError : ExitFound;
+            }
+
+            if (list)
+            {
+                string cl = BuildCustomerCsv(store.Data);
+                Write(header ? cl : StripHeader(cl), enc);
+                info.Detail = "顧客 " + store.Data.Customers.Count + " 件";
+                return store.Data.Customers.Count > 0 ? ExitFound : ExitNotFound;
+            }
+
+            List<Customer> targets;
+            if (all) { targets = store.Data.Customers.ToList(); full = true; }
+            else
+            {
+                if (query.IsEmpty)
+                    throw new CliError("検索条件（顧客名 / --name / --company / --phone / --any / --id）を指定してください（--help で使い方を表示）");
+                targets = store.Data.Search(query);
+            }
+
+            int count;
+            string csv = BuildHistoryCsv(store.Data, targets, full, header, out count);
+            info.Detail = string.Format("該当顧客 {0} 件・対応履歴 {1} 件{2}", targets.Count, count, count == 0 ? "（該当なし）" : "") +
+                          (targets.Count > 0 && targets.Count <= 5 ? "：" + string.Join("、", targets.Select(c => c.DisplayName)) : "");
+            if (count == 0)
+            {
+                Write(NotFoundMessage + "\r\n", enc);
+                return ExitNotFound;
+            }
+            Write(csv, enc);
+            return ExitFound;
         }
 
         /// <summary>検索条件で顧客を1件に特定し、対応履歴を登録する</summary>
-        static int RunAdd(CrmStore store, SearchQuery q, AddArgs a, Encoding enc)
+        static int RunAdd(CrmStore store, SearchQuery q, AddArgs a, Encoding enc, RunInfo info)
         {
             if (a.Inquiry.Length == 0 && a.Response.Length == 0 && a.Next.Length == 0)
                 throw new CliError("--inquiry / --response / --next のいずれかを指定してください");
@@ -333,6 +403,7 @@ namespace CrmDemo
                 sb.Append(Csv.Line("顧客ID", "顧客名", "会社名", "電話番号"));
                 foreach (var h in hits) sb.Append(Csv.Line(h.Id.ToString(), h.Name, h.Company, h.Phone));
                 Write(sb.ToString(), enc);
+                info.Detail = "登録せず：顧客が複数該当（" + string.Join("、", hits.Select(h => "ID:" + h.Id + " " + h.DisplayName)) + "）";
                 return ExitAmbiguous;
             }
 
@@ -343,6 +414,7 @@ namespace CrmDemo
                 if (!a.Create)
                 {
                     Write("該当する顧客がいません（--create を付けると新規顧客として登録します）\r\n", enc);
+                    info.Detail = "登録せず：該当する顧客なし";
                     return ExitNotFound;
                 }
                 if (q.Names.Count != 1) throw new CliError("新規顧客の登録には --name で顧客名を1つ指定してください");
@@ -367,6 +439,7 @@ namespace CrmDemo
                                                TextUtil.Norm(i.Inquiry) == ni && TextUtil.Norm(i.Response) == nr))
                 {
                     Write(string.Format("同じ内容の対応履歴が登録済みのため、登録しませんでした（顧客ID:{0} {1}）\r\n", c.Id, c.DisplayName), enc);
+                    info.Detail = string.Format("登録せず：同じ内容が登録済み（顧客ID:{0} {1}）", c.Id, c.DisplayName);
                     return ExitFound;
                 }
             }
@@ -377,8 +450,10 @@ namespace CrmDemo
                 NextDate = next, Staff = a.Staff, Done = a.Done
             });
             store.Save();
-            Write(string.Format("登録しました（{0}顧客ID:{1} {2}、対応履歴ID:{3}、対応日:{4}）\r\n",
-                created ? "新規顧客 " : "", c.Id, c.DisplayName, it.Id, TextUtil.Date(date)), enc);
+            string msg = string.Format("登録しました（{0}顧客ID:{1} {2}、対応履歴ID:{3}、対応日:{4}）",
+                created ? "新規顧客 " : "", c.Id, c.DisplayName, it.Id, TextUtil.Date(date));
+            Write(msg + "\r\n", enc);
+            info.Detail = msg;
             return ExitFound;
         }
 
@@ -386,6 +461,94 @@ namespace CrmDemo
         {
             int p = csv.IndexOf("\r\n", StringComparison.Ordinal);
             return p < 0 ? "" : csv.Substring(p + 2);
+        }
+    }
+
+    /// <summary>コマンドライン実行のログ（1実行1行、タブ区切り、UTF-8）</summary>
+    public static class RunLog
+    {
+        public const string FileName = "crm_log.txt";
+        const long MaxBytes = 5 * 1024 * 1024;
+        const string Header = "日時\t処理\t終了コード\t処理時間\t結果\t引数";
+
+        static bool IsOff(string v)
+        {
+            v = v.Trim().ToLowerInvariant();
+            return v == "off" || v == "none" || v == "0" || v == "false" || v == "no";
+        }
+
+        /// <summary>保存先: --log → 環境変数 CRM_LOG → データファイルと同じフォルダの crm_log.txt。無効なら null</summary>
+        public static string ResolvePath(string logOption, string dataPath)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(logOption)) return Path.GetFullPath(logOption);
+                string env = Environment.GetEnvironmentVariable("CRM_LOG");
+                if (!string.IsNullOrEmpty(env)) return IsOff(env) ? null : Path.GetFullPath(env);
+                string data = dataPath ?? CrmStore.ResolveDefaultPath();
+                return Path.Combine(Path.GetDirectoryName(Path.GetFullPath(data)), FileName);
+            }
+            catch { return null; }
+        }
+
+        public static string Format(DateTime at, string mode, int code, long ms, string detail, string[] args)
+        {
+            return string.Join("\t", new[]
+            {
+                at.ToString("yyyy-MM-dd HH:mm:ss.fff"), mode, "exit=" + code, ms + "ms",
+                Clean(detail), string.Join(" ", args.Select(QuoteArg))
+            });
+        }
+
+        static string Clean(string s)
+        {
+            return (s ?? "").Replace("\r\n", "\\n").Replace("\n", "\\n").Replace("\r", "\\n").Replace("\t", " ");
+        }
+
+        static string QuoteArg(string a)
+        {
+            a = Clean(a);
+            if (a.Length > 80) a = a.Substring(0, 80) + "…";   // 長い要約文はログでは省略
+            return a.Length == 0 || a.IndexOfAny(new[] { ' ', '　', ',', '"' }) >= 0 ? "\"" + a.Replace("\"", "\\\"") + "\"" : a;
+        }
+
+        /// <summary>
+        /// 1行追記する。GUI や別の呼び出しと同時に書くことがあるので少し待って再試行する。
+        /// ログが書けなくても検索・登録の結果には影響させない。
+        /// </summary>
+        public static void Append(string path, string line)
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(path);
+                    if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    var fi = new FileInfo(path);
+                    if (fi.Exists && fi.Length > MaxBytes)
+                    {
+                        string old = Path.Combine(dir, Path.GetFileNameWithoutExtension(path) + ".1" + Path.GetExtension(path));
+                        File.Copy(path, old, true);
+                        File.Delete(path);
+                    }
+                    using (var fs = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.Read))
+                    {
+                        if (fs.Length == 0)
+                        {
+                            // メモ帳や Excel でも文字化けしないよう、新しいファイルには BOM と見出しを付ける
+                            byte[] pre = Encoding.UTF8.GetPreamble();
+                            fs.Write(pre, 0, pre.Length);
+                            byte[] h = Encoding.UTF8.GetBytes(Header + "\r\n");
+                            fs.Write(h, 0, h.Length);
+                        }
+                        byte[] b = Encoding.UTF8.GetBytes(line + "\r\n");
+                        fs.Write(b, 0, b.Length);
+                    }
+                    return;
+                }
+                catch (IOException) { System.Threading.Thread.Sleep(30); }
+                catch { return; }
+            }
         }
     }
 }

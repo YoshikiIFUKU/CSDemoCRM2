@@ -3,3 +3,4 @@ crm_data.xml.bak
 crm_data.xml.tmp
 backup/
 crm_settings.ini
+crm_log*.txt

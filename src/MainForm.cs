@@ -170,6 +170,14 @@ namespace CrmDemo
             {
                 using (var f = new TextViewerForm("コマンドライン連携の使い方", null, Cli.HelpText())) f.ShowDialog(this);
             }));
+            help.DropDownItems.Add(Item("実行ログを開く（コマンドライン連携）", Keys.None, delegate
+            {
+                string path = RunLog.ResolvePath(null, store.FilePath);
+                if (path == null) { Ui.Info(this, "ログの出力が無効になっています（環境変数 CRM_LOG=off）。"); return; }
+                if (!File.Exists(path)) { Ui.Info(this, "まだログがありません。コマンドラインで実行すると作成されます。\r\n\r\n" + path); return; }
+                try { Process.Start("notepad.exe", "\"" + path + "\""); }
+                catch (Exception ex) { Ui.Warn(this, ex.Message); }
+            }));
             help.DropDownItems.Add(Item("バージョン情報", Keys.None, delegate
             {
                 Ui.Info(this, "CRM Demo 1.1\r\n顧客対応履歴管理（デモ用）\r\n\r\n動作環境: Windows 10 / 11（追加インストール不要）\r\nデータ: " + store.FilePath);

@@ -272,6 +272,14 @@ namespace CrmDemo
             }
         }
 
+        /// <summary>顧客名が空の行に対応する既存顧客（顧客名が空で、会社名と電話番号が同じ）</summary>
+        static Customer FindNameless(CrmData data, ImportRow row)
+        {
+            string company = TextUtil.Norm(row.Company), digits = Matcher.Digits(row.Phone);
+            return data.Customers.FirstOrDefault(x => x.Name.Length == 0 &&
+                TextUtil.Norm(x.Company) == company && Matcher.Digits(x.Phone) == digits);
+        }
+
         /// <summary>空欄の項目だけ新しい値で埋める（既存の値は上書きしない）</summary>
         static bool Fill(ref string field, string value)
         {
@@ -344,21 +352,21 @@ namespace CrmDemo
                     if (upd0 && !created.Contains(c.Id) && updated.Add(c.Id)) res.UpdatedCustomers++;
                     custStatus = upd0 ? "既存顧客(情報補完)" : "既存顧客";
                 }
-                else if (row.Name.Length == 0)
+                else if (row.Name.Length == 0 && row.Company.Length == 0 && row.Phone.Length == 0 && row.Email.Length == 0)
                 {
                     c = defaultCustomerId.HasValue ? data.GetCustomer(defaultCustomerId.Value) : null;
                     if (c == null || !row.HasCase)
                     {
                         res.Errors++;
-                        res.RowStatus.Add("エラー: 顧客名がありません");
+                        res.RowStatus.Add("エラー: 顧客の項目（顧客名・会社名・電話番号・メール）がありません");
                         continue;
                     }
                     custStatus = "選択中の顧客";
                 }
                 else
                 {
-                    c = data.FindExact(row.Name, row.Company);
-                    if (c == null && row.Company.Length == 0)
+                    c = row.Name.Length > 0 ? data.FindExact(row.Name, row.Company) : FindNameless(data, row);
+                    if (c == null && row.Name.Length > 0 && row.Company.Length == 0)
                     {
                         var cands = data.FindByName(row.Name, false, null);
                         if (cands.Count == 1) c = cands[0];

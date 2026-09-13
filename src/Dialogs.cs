@@ -186,7 +186,7 @@ namespace CrmDemo
             c = c ?? new Customer();
 
             var t = Ui.FormTable();
-            tName = Ui.AddText(t, "顧客名 *", c.Name);
+            tName = Ui.AddText(t, "顧客名", c.Name);
             tCompany = Ui.AddText(t, "会社名", c.Company);
             tPhone = Ui.AddText(t, "電話番号", c.Phone);
             tEmail = Ui.AddText(t, "メール", c.Email);
@@ -201,7 +201,12 @@ namespace CrmDemo
         void OnOk(object sender, EventArgs e)
         {
             string name = tName.Text.Trim();
-            if (name.Length == 0) { Ui.Warn(this, "顧客名を入力してください。"); tName.Focus(); return; }
+            if (name.Length == 0 && tCompany.Text.Trim().Length == 0 && tPhone.Text.Trim().Length == 0)
+            {
+                Ui.Warn(this, "顧客名・会社名・電話番号のいずれかを入力してください。");
+                tName.Focus();
+                return;
+            }
             string email = tEmail.Text.Trim();
             if (email.Length > 0 && !email.Contains("@")) { Ui.Warn(this, "メールアドレスの形式が正しくありません。"); tEmail.Focus(); return; }
             var ex = data.FindExact(name, tCompany.Text);
@@ -252,7 +257,7 @@ namespace CrmDemo
             chkDefault = new CheckBox
             {
                 AutoSize = true, Margin = new Padding(Ui.S(12), Ui.S(9), 0, 0), Enabled = current != null, Checked = current != null,
-                Text = current != null ? "顧客名が空の行は選択中の顧客「" + current.DisplayName + "」に取り込む" : "顧客名が空の行は選択中の顧客に取り込む（顧客未選択）"
+                Text = current != null ? "顧客の項目がすべて空の行は選択中の顧客「" + current.DisplayName + "」に取り込む" : "顧客の項目がすべて空の行は選択中の顧客に取り込む（顧客未選択）"
             };
             chkDefault.CheckedChanged += delegate { UpdatePreview(); };
             tools.Controls.Add(chkDefault);

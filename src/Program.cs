@@ -5,8 +5,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("CSDemoCRM2")]
 [assembly: AssemblyProduct("CSDemoCRM2 - 顧客・ケース管理")]
-[assembly: AssemblyVersion("2.3.0.0")]
-[assembly: AssemblyFileVersion("2.3.0.0")]
+[assembly: AssemblyVersion("2.4.0.0")]
+[assembly: AssemblyFileVersion("2.4.0.0")]
 
 namespace CrmDemo
 {

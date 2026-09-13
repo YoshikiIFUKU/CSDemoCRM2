@@ -21,9 +21,16 @@ namespace CrmDemo
         public DateTime CreatedAt = DateTime.Now;
         public DateTime UpdatedAt = DateTime.Now;
 
+        /// <summary>画面・ログに出す名前（顧客名は任意なので、無ければ会社名・電話番号で代用する）</summary>
         public string DisplayName
         {
-            get { return string.IsNullOrEmpty(Company) ? Name : Name + "（" + Company + "）"; }
+            get
+            {
+                if (!string.IsNullOrEmpty(Name)) return string.IsNullOrEmpty(Company) ? Name : Name + "（" + Company + "）";
+                if (!string.IsNullOrEmpty(Company)) return Company + (string.IsNullOrEmpty(Phone) ? "" : "（" + Phone + "）");
+                if (!string.IsNullOrEmpty(Phone)) return Phone;
+                return "（顧客情報なし）";
+            }
         }
     }
 

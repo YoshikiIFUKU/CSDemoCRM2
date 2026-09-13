@@ -135,8 +135,8 @@ namespace CrmDemo
 "      --no-create           顧客が見つからないとき、新規作成せず終了コード 1 にする\r\n" +
 "      --email <メール>      顧客を新規作成するときのメールアドレス\r\n" +
 "  ・顧客は検索条件で特定します。見つからない場合は --name / --company / --phone の値で\r\n" +
-"    新しい顧客を作り、そこにケースを起票します（--no-create で抑止）。\r\n" +
-"    --any だけの場合は、値を「顧客名,会社名,電話番号」の順とみなして作成します（空欄可）。\r\n" +
+"    新しい顧客を作り、そこにケースを起票します（--no-create で抑止）。顧客名は任意で、空の値もそのまま登録します。\r\n" +
+"    --any だけの場合は、値を「顧客名,会社名,電話番号」の順とみなして作成します（空欄可。3つとも空なら空の顧客を作成）。\r\n" +
 "  ・顧客が複数該当したときは起票せず、候補を出力して終了コード 2（--pick で選択画面）。\r\n" +
 "  ・キー項目（既定は 通話ID / call_id）に同じ値のケースがあれば、そのケースを更新します。\r\n" +
 "    通話中に複数回コマンドを送っても1件のケースにまとまります（--new で常に新規）。\r\n" +
@@ -684,15 +684,10 @@ namespace CrmDemo
             }
             else
             {
-                if (q.IsEmpty)
-                {
-                    if (!condGiven)
-                        throw new CliError("顧客を --name / --company / --phone / --any / --id で指定してください");
-                    Write(NotFoundMessage + "\r\n", enc);
-                    info.Detail = "登録せず：検索条件の値が空";
-                    return ExitNotFound;
-                }
-                var hits = data.Search(q);
+                if (q.IsEmpty && !condGiven)
+                    throw new CliError("顧客を --name / --company / --phone / --any / --id で指定してください");
+                // 値がすべて空のときは照合しない（空の条件は全員に一致してしまうため）。そのまま新規作成へ進む
+                var hits = q.IsEmpty ? new List<Customer>() : data.Search(q);
                 if (hits.Count > 1 && pick)
                 {
                     Customer chosen;
@@ -744,16 +739,7 @@ namespace CrmDemo
                     string newName = q.Names.Count == 1 ? q.Names[0] : anyAt(0);
                     string newCompany = q.Companies.Count == 1 ? q.Companies[0] : anyAt(1);
                     string newPhone = q.Phones.Count == 1 ? q.Phones[0] : anyAt(2);
-                    if (newName.Length == 0)
-                    {
-                        if (anyRaw.Count > 0)
-                        {
-                            Write(NotFoundMessage + "\r\n", enc);
-                            info.Detail = "登録せず：該当する顧客なし（--any の1つ目＝顧客名が空のため新規作成できません）";
-                            return ExitNotFound;
-                        }
-                        throw new CliError("該当する顧客がいません。新規作成するには --name か --any \"顧客名,会社名,電話番号\" を指定してください（--no-create で作成しない）");
-                    }
+                    // 顧客名は任意。空の値も含め、渡された値のとおりに顧客を作る
                     customer = data.AddCustomer(new Customer
                     {
                         Name = newName,
@@ -762,9 +748,9 @@ namespace CrmDemo
                         Email = email ?? ""
                     });
                     createdCustomer = true;
-                    if (q.Names.Count == 0)
-                        createNote = string.Format("／--any から新規顧客を作成（顧客名={0}、会社名={1}、電話番号={2}）",
-                            newName, newCompany.Length > 0 ? newCompany : "なし", newPhone.Length > 0 ? newPhone : "なし");
+                    createNote = string.Format("／新規顧客を作成（顧客名={0}、会社名={1}、電話番号={2}）",
+                        newName.Length > 0 ? newName : "なし", newCompany.Length > 0 ? newCompany : "なし",
+                        newPhone.Length > 0 ? newPhone : "なし");
                 }
             }
             if (customer == null) throw new CliError("顧客を特定できませんでした");

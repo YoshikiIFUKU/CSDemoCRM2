@@ -150,7 +150,7 @@ namespace CrmDemo
             }));
             help.DropDownItems.Add(Item("バージョン情報", Keys.None, delegate
             {
-                Ui.Info(this, "CSDemoCRM2 2.3\r\n顧客・ケース管理（デモ用）\r\n\r\n動作環境: Windows 10 / 11（追加インストール不要）\r\nデータ: " + store.FilePath);
+                Ui.Info(this, "CSDemoCRM2 2.4\r\n顧客・ケース管理（デモ用）\r\n\r\n動作環境: Windows 10 / 11（追加インストール不要）\r\nデータ: " + store.FilePath);
             }));
 
             m.Items.AddRange(new ToolStripItem[] { file, edit, view, data, help });
@@ -430,7 +430,9 @@ namespace CrmDemo
             }
             else
             {
-                lblCustName.Text = c.Name + " 様" + (c.Company.Length > 0 ? "　／　" + c.Company : "");
+                lblCustName.Text = c.Name.Length > 0
+                    ? c.Name + " 様" + (c.Company.Length > 0 ? "　／　" + c.Company : "")
+                    : c.DisplayName;
                 lblCustInfo.Text = string.Format("電話: {0}　　メール: {1}\r\n住所: {2}\r\n備考: {3}",
                     Dash(c.Phone), Dash(c.Email), Dash(c.Address), Dash(TextUtil.OneLine(c.Memo)));
             }

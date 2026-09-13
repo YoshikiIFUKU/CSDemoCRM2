@@ -29,6 +29,7 @@ namespace CrmDemo
         {
             public string Mode = "search", Detail = "", LogPath, DataPath;
             public bool NoLog;
+            public bool Exit0;   // --exit0: 該当なし(1)・複数該当(2) も 0 で返す
             public Encoding Enc;
         }
 
@@ -158,6 +159,7 @@ namespace CrmDemo
 "      --no-header          見出し行を出力しない\r\n" +
 "  -e, --encoding <名前>    標準出力・標準エラー出力の文字コード: utf8（既定）/ utf8bom / sjis\r\n" +
 "      --pick               顧客が複数該当したとき、選択画面を出して1件に絞る\r\n" +
+"      --exit0              該当なし・複数該当・選択のキャンセルでも終了コード 0 を返す（エラーは 9 のまま）\r\n" +
 "      --pick-timeout <秒>  選択画面が操作されないときに自動でキャンセルする\r\n" +
 "      --all                全顧客のケースを出力（--full 形式）\r\n" +
 "      --list               顧客一覧をCSVで出力\r\n" +
@@ -168,6 +170,7 @@ namespace CrmDemo
 "\r\n" +
 "■ 終了コード\r\n" +
 "  0 = 該当あり・登録完了 / 1 = 該当なし / 2 = 顧客が複数該当・選択がキャンセル / 9 = エラー\r\n" +
+"  ・0 以外をエラーとみなす連携先では --exit0 を付けると、1 と 2 も 0 で返します。\r\n" +
 "\r\n" +
 "■ 例\r\n" +
 "  " + exe + " \"山田 太郎\"\r\n" +
@@ -356,6 +359,12 @@ namespace CrmDemo
                 try { WriteErr("エラー: " + ex.Message + "\r\n", info.Enc); } catch { }
                 code = ExitError;
             }
+            // 0 以外をすべて失敗とみなす連携先向け。結果が無いだけの場合は 0 にし、本当のエラー(9)は残す
+            if (info.Exit0 && (code == ExitNotFound || code == ExitAmbiguous))
+            {
+                info.Detail += "（終了コード " + code + " → --exit0 により 0）";
+                code = ExitFound;
+            }
             if (info.Mode != "help" && !info.NoLog)
             {
                 string path = RunLog.ResolvePath(info.LogPath, info.DataPath);
@@ -372,6 +381,7 @@ namespace CrmDemo
             {
                 string k = args[i].ToLowerInvariant();
                 if (k == "--no-log") info.NoLog = true;
+                if (k == "--exit0") info.Exit0 = true;
                 if (i + 1 >= args.Length) continue;
                 if (k == "--log") info.LogPath = args[i + 1];
                 else if (k == "--data") info.DataPath = args[i + 1];
@@ -472,6 +482,7 @@ namespace CrmDemo
                     case "--data": NextArg(args, ref i, a); break;                   // 先読み済み
                     case "--log": NextArg(args, ref i, a); break;                    // 先読み済み
                     case "--no-log": break;
+                    case "--exit0": break;                                           // 先読み済み
                     case "--import": importFile = NextArg(args, ref i, a); break;
                     case "--": rest = true; break;
                     default:

@@ -444,7 +444,7 @@ namespace CrmDemo
         {
             var sb = new StringBuilder();
             sb.Append(CrmDemo.Csv.Line("顧客名", "会社名", "電話番号", "メール",
-                "call_id", "subject", "call_date", "operator_name", "customer_name", "category",
+                "call_id", "subject", "call_date", "operator_name", "category",
                 "summary", "response", "next_action", "detail_url"));
             int seq = 1001;
             // (顧客名, 会社名, 電話番号, メール, 何日前, 時刻, 件名, オペレータ, 用件区分, 問い合わせ内容, 対応内容, 次回確認内容)
@@ -453,7 +453,7 @@ namespace CrmDemo
                 {
                     string id = "C-" + (seq++);
                     sb.Append(CrmDemo.Csv.Line(name, co, tel, mail, id, subject,
-                        DateTime.Today.AddDays(-ago).ToString("yyyy/MM/dd") + " " + time, op, name, category,
+                        DateTime.Today.AddDays(-ago).ToString("yyyy/MM/dd") + " " + time, op, category,
                         summary, response, next, "https://example.com/calls/" + id));
                 };
 

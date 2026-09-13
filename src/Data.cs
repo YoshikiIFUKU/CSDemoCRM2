@@ -169,7 +169,6 @@ namespace CrmDemo
             new object[] { "件名", "subject", FieldTypes.Text, "", false, false, false },
             new object[] { "通話日時", "call_date", FieldTypes.DateTimeType, "", false, false, false },
             new object[] { "オペレータ", "operator_name", FieldTypes.Text, "", false, false, false },
-            new object[] { "顧客名", "customer_name", FieldTypes.Text, "", false, false, false },
             new object[] { "用件区分", "category", FieldTypes.Select, "問い合わせ\n申込\n変更\n解約\nクレーム\nその他", false, false, false },
             new object[] { "通話詳細URL", "detail_url", FieldTypes.Url, "", false, false, false },
             new object[] { "問い合わせ内容", "summary", FieldTypes.TextArea, "", false, true, false },
@@ -364,9 +363,7 @@ namespace CrmDemo
                 AddCase(c);
                 c.CreatedAt = it.CreatedAt;
                 c.UpdatedAt = it.UpdatedAt;
-                var owner = GetCustomer(it.CustomerId);
                 c.Set("call_date", it.Date.ToString("yyyy/MM/dd HH:mm"));
-                c.Set("customer_name", owner == null ? "" : owner.Name);
                 c.Set("operator_name", it.Staff);
                 c.Set("summary", it.Inquiry);
                 c.Set("response", it.Response);

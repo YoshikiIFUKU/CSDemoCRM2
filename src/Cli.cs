@@ -134,7 +134,8 @@ namespace CrmDemo
 "      --no-create           顧客が見つからないとき、新規作成せず終了コード 1 にする\r\n" +
 "      --email <メール>      顧客を新規作成するときのメールアドレス\r\n" +
 "  ・顧客は検索条件で特定します。見つからない場合は --name / --company / --phone の値で\r\n" +
-"    新しい顧客を作り、そこにケースを起票します（--name は必須。--no-create で抑止）。\r\n" +
+"    新しい顧客を作り、そこにケースを起票します（--no-create で抑止）。\r\n" +
+"    --any だけの場合は、値を「顧客名,会社名,電話番号」の順とみなして作成します（空欄可）。\r\n" +
 "  ・顧客が複数該当したときは起票せず、候補を出力して終了コード 2（--pick で選択画面）。\r\n" +
 "  ・キー項目（既定は 通話ID / call_id）に同じ値のケースがあれば、そのケースを更新します。\r\n" +
 "    通話中に複数回コマンドを送っても1件のケースにまとまります（--new で常に新規）。\r\n" +
@@ -388,6 +389,7 @@ namespace CrmDemo
             var sets = new List<KeyValuePair<string, string>>();     // 変数名=値
             var setEnv = new List<KeyValuePair<string, string>>();   // 変数名=環境変数名
             var envPrefixes = new List<string>();
+            var anyRaw = new List<string>();                          // 1つ目の --any の値（空欄の位置を保持）
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -408,7 +410,14 @@ namespace CrmDemo
                     case "-n": case "--name": query.Names.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
                     case "-c": case "--company": query.Companies.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
                     case "-t": case "--phone": case "--tel": query.Phones.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
-                    case "-a": case "--any": query.Anys.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
+                    case "-a": case "--any":
+                        {
+                            string v = NextArg(args, ref i, a);
+                            query.Anys.AddRange(SearchQuery.Split(v));
+                            if (anyRaw.Count == 0) anyRaw = SearchQuery.SplitKeepEmpty(v);
+                            condGiven = true;
+                            break;
+                        }
                     case "--id":
                         condGiven = true;
                         foreach (var v in SearchQuery.Split(NextArg(args, ref i, a)))
@@ -539,7 +548,7 @@ namespace CrmDemo
             {
                 info.Mode = "add";
                 return RunAdd(store, query, sets, setEnv, envPrefixes, caseNumber, email, forceNew, noCreate,
-                              enc, info, pick, pickTimeout, condGiven);
+                              enc, info, pick, pickTimeout, condGiven, anyRaw);
             }
             if (sets.Count > 0 || setEnv.Count > 0 || envPrefixes.Count > 0 || caseNumber != null || forceNew)
                 throw new CliError("--set / --env-prefix / --case などは --add と一緒に指定してください");
@@ -597,7 +606,7 @@ namespace CrmDemo
         static int RunAdd(CrmStore store, SearchQuery q, List<KeyValuePair<string, string>> sets,
                           List<KeyValuePair<string, string>> setEnv, List<string> envPrefixes,
                           string caseNumber, string email, bool forceNew, bool noCreate,
-                          Encoding enc, RunInfo info, bool pick, int pickTimeout, bool condGiven)
+                          Encoding enc, RunInfo info, bool pick, int pickTimeout, bool condGiven, List<string> anyRaw)
         {
             var data = store.Data;
             var warnings = new List<string>();
@@ -657,6 +666,7 @@ namespace CrmDemo
             // 3) 顧客の特定（更新対象のケースがあるときはその顧客）
             Customer customer = null;
             bool createdCustomer = false;
+            string createNote = "";
             if (target != null)
             {
                 customer = data.GetCustomer(target.CustomerId);
@@ -716,16 +726,34 @@ namespace CrmDemo
                         info.Detail = "登録せず：該当する顧客なし（--no-create 指定）";
                         return ExitNotFound;
                     }
-                    if (q.Names.Count != 1)
-                        throw new CliError("該当する顧客がいません。新規作成するには --name で顧客名を1つ指定してください（--no-create で作成しない）");
+                    if (q.Names.Count > 1)
+                        throw new CliError("該当する顧客がいません。新規作成するには --name で顧客名を1つだけ指定してください");
+                    // 明示の --name / --company / --phone を優先し、無ければ --any を「顧客名,会社名,電話番号」の順とみなす
+                    Func<int, string> anyAt = n => n < anyRaw.Count ? anyRaw[n] : "";
+                    string newName = q.Names.Count == 1 ? q.Names[0] : anyAt(0);
+                    string newCompany = q.Companies.Count == 1 ? q.Companies[0] : anyAt(1);
+                    string newPhone = q.Phones.Count == 1 ? q.Phones[0] : anyAt(2);
+                    if (newName.Length == 0)
+                    {
+                        if (anyRaw.Count > 0)
+                        {
+                            Write(NotFoundMessage + "\r\n", enc);
+                            info.Detail = "登録せず：該当する顧客なし（--any の1つ目＝顧客名が空のため新規作成できません）";
+                            return ExitNotFound;
+                        }
+                        throw new CliError("該当する顧客がいません。新規作成するには --name か --any \"顧客名,会社名,電話番号\" を指定してください（--no-create で作成しない）");
+                    }
                     customer = data.AddCustomer(new Customer
                     {
-                        Name = q.Names[0],
-                        Company = q.Companies.Count == 1 ? q.Companies[0] : "",
-                        Phone = q.Phones.Count == 1 ? q.Phones[0] : "",
+                        Name = newName,
+                        Company = newCompany,
+                        Phone = newPhone,
                         Email = email ?? ""
                     });
                     createdCustomer = true;
+                    if (q.Names.Count == 0)
+                        createNote = string.Format("／--any から新規顧客を作成（顧客名={0}、会社名={1}、電話番号={2}）",
+                            newName, newCompany.Length > 0 ? newCompany : "なし", newPhone.Length > 0 ? newPhone : "なし");
                 }
             }
             if (customer == null) throw new CliError("顧客を特定できませんでした");
@@ -761,7 +789,7 @@ namespace CrmDemo
                 action, createdCustomer ? "新規顧客 " : "", customer.Id, customer.DisplayName, target.Number);
             Write(msg + "\r\n", enc);
             foreach (var w in warnings) WriteErr("警告: " + w + "\r\n", enc);
-            info.Detail = msg + (warnings.Count > 0 ? "／警告 " + warnings.Count + " 件" : "") +
+            info.Detail = msg + createNote + (warnings.Count > 0 ? "／警告 " + warnings.Count + " 件" : "") +
                           "／設定: " + string.Join(",", values.Keys.ToArray());
             return ExitFound;
         }

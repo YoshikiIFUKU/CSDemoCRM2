@@ -26,6 +26,12 @@ namespace CrmDemo
         {
             return (s ?? "").Split(Separators).Select(x => x.Trim()).Where(x => x.Length > 0).ToList();
         }
+
+        /// <summary>空欄も位置を保ったまま分割する（--any を「顧客名,会社名,電話番号」の順で読むとき用）</summary>
+        public static List<string> SplitKeepEmpty(string s)
+        {
+            return (s ?? "").Split(Separators).Select(x => x.Trim()).ToList();
+        }
     }
 
     /// <summary>

@@ -150,7 +150,7 @@ namespace CrmDemo
             }));
             help.DropDownItems.Add(Item("バージョン情報", Keys.None, delegate
             {
-                Ui.Info(this, "CSDemoCRM2 2.0\r\n顧客・ケース管理（デモ用）\r\n\r\n動作環境: Windows 10 / 11（追加インストール不要）\r\nデータ: " + store.FilePath);
+                Ui.Info(this, "CSDemoCRM2 2.1\r\n顧客・ケース管理（デモ用）\r\n\r\n動作環境: Windows 10 / 11（追加インストール不要）\r\nデータ: " + store.FilePath);
             }));
 
             m.Items.AddRange(new ToolStripItem[] { file, edit, view, data, help });

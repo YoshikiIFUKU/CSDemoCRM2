@@ -4,31 +4,25 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace CrmDemo
 {
     /// <summary>
     /// コマンドライン（引数あり起動）
-    /// ・検索: 顧客名・会社名・電話番号で検索し、対応履歴をCSVで標準出力する
-    /// ・登録（--add）: 特定した顧客に問い合わせ内容・対応内容・次回確認内容を登録する（通話後の自動転記）
+    /// ・検索: 顧客名・会社名・電話番号で検索し、ケースをCSVで標準出力する
+    /// ・登録（--add）: 顧客を特定して（無ければ作って）ケースを起票する。値は --set 変数名=値 で指定
     /// ・実行ごとに crm_log.txt へ1行ログを残す
     /// </summary>
     public static class Cli
     {
         public const string NotFoundMessage = "該当する情報がありません";
         public const int ExitFound = 0, ExitNotFound = 1, ExitAmbiguous = 2, ExitError = 9;
+        public const string DefaultEnvPrefix = "AMIVOICE_CS_";
 
-        public static readonly string[] HistoryHeader = { "対応日", "問い合わせ内容", "対応内容", "次回確認内容" };
-        public static readonly string[] FullHeader =
-            { "顧客ID", "顧客名", "会社名", "電話番号", "メール", "対応日", "問い合わせ内容", "対応内容", "次回確認内容", "次回確認日", "担当者", "状態" };
+        public static readonly string[] CustomerColumns = { "顧客ID", "顧客名", "会社名", "電話番号", "メール", "ケース番号" };
 
         class CliError : Exception { public CliError(string m) : base(m) { } }
-
-        class AddArgs
-        {
-            public string Inquiry = "", Response = "", Next = "", Staff = "", Email = "", DateText = "", NextDateText = "";
-            public bool Done, Create, Given;
-        }
 
         /// <summary>1回の実行の情報（ログ用）</summary>
         class RunInfo
@@ -38,23 +32,36 @@ namespace CrmDemo
             public Encoding Enc;
         }
 
-        /// <summary>指定顧客の対応履歴CSV（対応日の昇順）。GUIの「連携CSV出力プレビュー」「連携検索テスト」でも同じものを使う。</summary>
+        // ------------------------------------------------------------------ 出力の組み立て
+
+        /// <summary>
+        /// 指定顧客のケースCSV（並び順の日付の昇順）。
+        /// full=false は「一覧・標準出力に含める」フィールドだけ、full=true は顧客情報＋全フィールド。
+        /// GUIの「連携CSV出力プレビュー」「連携検索テスト」でも同じものを使う。
+        /// </summary>
         public static string BuildHistoryCsv(CrmData data, IEnumerable<Customer> customers, bool full, bool header, out int count)
         {
             var custs = customers.ToDictionary(c => c.Id);
-            var items = data.Interactions.Where(i => custs.ContainsKey(i.CustomerId))
-                            .OrderBy(i => i.Date).ThenBy(i => i.CustomerId).ThenBy(i => i.Id).ToList();
-            count = items.Count;
+            var cases = data.Cases.Where(c => custs.ContainsKey(c.CustomerId))
+                            .OrderBy(c => data.SortDate(c)).ThenBy(c => c.CustomerId).ThenBy(c => c.Id).ToList();
+            count = cases.Count;
+            var fields = full ? data.SortedFields : data.ListFields;
+
             var sb = new StringBuilder();
-            if (header) sb.Append(Csv.Line(full ? FullHeader : HistoryHeader));
-            foreach (var i in items)
+            if (header)
             {
-                var c = custs[i.CustomerId];
-                if (full)
-                    sb.Append(Csv.Line(c.Id.ToString(), c.Name, c.Company, c.Phone, c.Email, TextUtil.Date(i.Date),
-                        i.Inquiry, i.Response, i.NextAction, TextUtil.Date(i.NextDate), i.Staff, i.Done ? "完了" : "未完了"));
-                else
-                    sb.Append(Csv.Line(TextUtil.Date(i.Date), i.Inquiry, i.Response, i.NextAction));
+                var cols = new List<string>();
+                if (full) cols.AddRange(CustomerColumns);
+                cols.AddRange(fields.Select(f => f.Label));
+                sb.Append(Csv.Line(cols.ToArray()));
+            }
+            foreach (var cs in cases)
+            {
+                var c = custs[cs.CustomerId];
+                var row = new List<string>();
+                if (full) row.AddRange(new[] { c.Id.ToString(), c.Name, c.Company, c.Phone, c.Email, cs.Number });
+                row.AddRange(fields.Select(f => cs.Get(f.ApiName)));
+                sb.Append(Csv.Line(row.ToArray()));
             }
             return sb.ToString();
         }
@@ -62,13 +69,24 @@ namespace CrmDemo
         public static string BuildCustomerCsv(CrmData data)
         {
             var sb = new StringBuilder();
-            sb.Append(Csv.Line("顧客ID", "顧客名", "会社名", "電話番号", "メール", "住所", "備考", "対応件数", "最終対応日"));
+            sb.Append(Csv.Line("顧客ID", "顧客名", "会社名", "電話番号", "メール", "住所", "備考", "ケース件数", "最終対応日"));
             foreach (var c in data.Customers.OrderBy(x => x.Id))
             {
-                var h = data.Interactions.Where(i => i.CustomerId == c.Id).ToList();
+                var cases = data.Cases.Where(x => x.CustomerId == c.Id).ToList();
                 sb.Append(Csv.Line(c.Id.ToString(), c.Name, c.Company, c.Phone, c.Email, c.Address, c.Memo,
-                    h.Count.ToString(), h.Count > 0 ? TextUtil.Date(h.Max(i => i.Date)) : ""));
+                    cases.Count.ToString(),
+                    cases.Count > 0 ? TextUtil.Date(cases.Max(x => data.SortDate(x))) : ""));
             }
+            return sb.ToString();
+        }
+
+        public static string BuildFieldsCsv(CrmData data)
+        {
+            var sb = new StringBuilder();
+            sb.Append(Csv.Line("表示名", "変数名", "型", "選択肢", "必須", "一覧・標準出力", "キー項目"));
+            foreach (var f in data.SortedFields)
+                sb.Append(Csv.Line(f.Label, f.ApiName, FieldTypes.Label(f.Type), f.Options.Replace("\n", " / "),
+                    f.Required ? "○" : "", f.InList ? "○" : "", f.IsKey ? "○" : ""));
             return sb.ToString();
         }
 
@@ -81,87 +99,95 @@ namespace CrmDemo
         {
             string exe = ExeName;
             return
-"CRM Demo - 顧客対応履歴管理\r\n" +
+"CSDemoCRM2 - 顧客・ケース管理\r\n" +
 "\r\n" +
 "■ 使い方\r\n" +
 "  " + exe + "                         GUIを起動\r\n" +
-"  " + exe + " <顧客名> [オプション]       対応履歴をCSVで標準出力\r\n" +
+"  " + exe + " <顧客名> [オプション]       その顧客のケースをCSVで標準出力\r\n" +
 "  " + exe + " [検索条件...] [オプション]\r\n" +
-"  " + exe + " --add [検索条件...] --inquiry ... --response ... --next ...   対応履歴を登録\r\n" +
+"  " + exe + " --add [検索条件...] --set <変数名>=<値> ...   ケースを起票\r\n" +
 "\r\n" +
-"■ 検索条件（検索・登録で共通）\r\n" +
+"■ 検索条件（検索・登録で共通。顧客を特定する条件）\r\n" +
 "  -n, --name <顧客名>       顧客名（完全一致。--partial で部分一致）\r\n" +
 "  -c, --company <会社名>    会社名（部分一致。株式会社・(株) などの法人格は無視）\r\n" +
 "  -t, --phone <電話番号>    電話番号（数字だけで比較。10桁以上は全桁一致、4〜9桁は末尾一致）\r\n" +
 "  -a, --any <値>            顧客名・会社名・電話番号のいずれかに一致\r\n" +
 "      --id <顧客ID>         顧客ID\r\n" +
 "  ・値はカンマ（, 、）区切りで複数指定でき、同じ項目内は OR 検索になります。\r\n" +
-"    同じオプションを繰り返しても OR です（--name 山田太郎 --name 佐藤花子）。\r\n" +
 "  ・異なる項目どうしは AND で絞り込みます（--name 佐藤花子 --company テスト工業）。\r\n" +
-"  ・どの項目か不確かな値は --any に渡すと、いずれかの項目に一致すれば該当とします。\r\n" +
 "  ・空白の有無・全角半角・大文字小文字、末尾の「様」「さん」は区別しません。\r\n" +
-"  ・オプションなしの引数は顧客名として扱います（\"山田 太郎\" と 山田 太郎 は同じ）。\r\n" +
+"  ・オプションなしの引数は顧客名として扱います。\r\n" +
+"  ・条件のオプションを指定して値が空のときはエラーにせず、該当なし（終了コード 1）にします。\r\n" +
 "\r\n" +
 "■ 検索の出力（既定）\r\n" +
-"  対応日,問い合わせ内容,対応内容,次回確認内容\r\n" +
-"  ・対応日の古い順。1行目は見出し。改行やカンマを含む項目は \"...\" で囲みます。\r\n" +
-"  ・該当なしの場合は「" + NotFoundMessage + "」を出力します。\r\n" +
-"  ・複数の顧客に該当しうる検索では --full を付けると、行ごとに顧客名・会社名が付きます。\r\n" +
+"  フィールド設定で「一覧・標準出力に含める」にした項目を、並び順どおりCSVで出力します。\r\n" +
+"  ・並びは日付項目の古い順。1行目は見出し（表示名）。\r\n" +
+"  ・--full を付けると 顧客ID,顧客名,会社名,電話番号,メール,ケース番号 と全フィールドを出力します。\r\n" +
+"  ・該当なしの場合は「" + NotFoundMessage + "」だけを出力します（理由によらず同じ1行）。\r\n" +
+"      --fields             フィールド定義の一覧をCSVで出力（指定できる変数名の確認用）\r\n" +
 "\r\n" +
-"■ 対応履歴の登録（通話後の自動転記など）\r\n" +
+"■ ケースの起票（--add）\r\n" +
 "      --add                 登録モード\r\n" +
-"      --inquiry <内容>      問い合わせ内容\r\n" +
-"      --response <内容>     対応内容\r\n" +
-"      --next <内容>         次回確認内容\r\n" +
-"      --date <日付>         対応日（既定: 今日）\r\n" +
-"      --next-date <日付>    次回確認日\r\n" +
-"      --staff <担当者>      担当者\r\n" +
-"      --done                完了（フォロー不要）として登録\r\n" +
-"      --create              該当する顧客がいなければ新規顧客として登録（--name 必須）\r\n" +
-"      --email <メール>      新規顧客のメールアドレス\r\n" +
-"  ・検索条件で顧客がちょうど1件に決まったときだけ登録します。\r\n" +
-"      該当なし → 登録せず終了コード 1（--create で新規顧客を作って登録）\r\n" +
-"      複数該当 → 登録せず候補（顧客ID,顧客名,会社名,電話番号）を出力して終了コード 2\r\n" +
-"  ・誤登録を防ぐため、--name と --phone（または --company）の組み合わせを推奨します。\r\n" +
-"  ・既存顧客の電話番号・会社名が空欄なら、指定した値で補完します（入力済みの値は上書きしません）。\r\n" +
-"  ・同じ顧客・対応日・問い合わせ内容・対応内容の履歴があれば二重登録しません。\r\n" +
-"  ・値の中の \\n は改行として扱います。GUIを開いていれば自動で画面に反映されます。\r\n" +
+"      --set <変数名>=<値>   ケースの値（複数指定可。--set は省略して 変数名=値 でも可）\r\n" +
+"      --case CS-00001       ケース番号を指定して更新\r\n" +
+"      --new                 キー項目が一致しても必ず新しいケースを作る\r\n" +
+"      --no-create           顧客が見つからないとき、新規作成せず終了コード 1 にする\r\n" +
+"      --email <メール>      顧客を新規作成するときのメールアドレス\r\n" +
+"  ・顧客は検索条件で特定します。見つからない場合は --name / --company / --phone の値で\r\n" +
+"    新しい顧客を作り、そこにケースを起票します（--name は必須。--no-create で抑止）。\r\n" +
+"  ・顧客が複数該当したときは起票せず、候補を出力して終了コード 2（--pick で選択画面）。\r\n" +
+"  ・キー項目（既定は 通話ID / call_id）に同じ値のケースがあれば、そのケースを更新します。\r\n" +
+"    通話中に複数回コマンドを送っても1件のケースにまとまります（--new で常に新規）。\r\n" +
+"  ・値の中の \\n は改行、%VAR% は環境変数の値に展開します。\r\n" +
+"\r\n" +
+"■ 環境変数からの取り込み\r\n" +
+"      --env-prefix [接頭辞]     接頭辞に一致する環境変数を、同じ名前のフィールドへ入れる\r\n" +
+"                                （省略時は " + DefaultEnvPrefix + "。" + DefaultEnvPrefix + "SUMMARY → summary）\r\n" +
+"      --set-env <変数名>=<環境変数名>  フィールドと環境変数を明示的に対応させる\r\n" +
+"      --show-env [接頭辞]       渡された環境変数と対応するフィールドを一覧表示\r\n" +
 "\r\n" +
 "■ ログ\r\n" +
 "  実行するたびに、データファイルと同じフォルダの " + RunLog.FileName + " に1行追記します。\r\n" +
-"  （日時・処理・終了コード・処理時間・結果・引数。タブ区切り、UTF-8。5MBを超えると .1 に切り替え）\r\n" +
 "      --log <ファイル>      ログの保存先（環境変数 CRM_LOG でも可）\r\n" +
 "      --no-log              ログを出力しない（CRM_LOG=off でも可）\r\n" +
 "\r\n" +
 "■ その他のオプション\r\n" +
 "  -p, --partial            顧客名を部分一致で検索する\r\n" +
-"  -f, --full               顧客ID・顧客名・会社名・電話番号・メール・次回確認日・担当者・状態の列も出力\r\n" +
+"  -f, --full               顧客情報の列と全フィールドを出力\r\n" +
 "      --no-header          見出し行を出力しない\r\n" +
 "  -e, --encoding <名前>    標準出力・標準エラー出力の文字コード: utf8（既定）/ utf8bom / sjis\r\n" +
-"                           ※ パイプ・リダイレクト時の既定はBOMなしUTF-8（標準エラー出力にBOMは付けません）。\r\n" +
-"                             Windows PowerShell 5.1 で変数に受ける場合などは sjis を指定。\r\n" +
-"      --all                全顧客の対応履歴を出力（--full 形式）\r\n" +
+"      --pick               顧客が複数該当したとき、選択画面を出して1件に絞る\r\n" +
+"      --pick-timeout <秒>  選択画面が操作されないときに自動でキャンセルする\r\n" +
+"      --all                全顧客のケースを出力（--full 形式）\r\n" +
 "      --list               顧客一覧をCSVで出力\r\n" +
+"      --sample             デモ用のサンプルデータを投入（顧客8件・ケース18件）\r\n" +
 "      --import <ファイル>  CSV / タブ区切りファイルを取り込む\r\n" +
 "      --data <ファイル>    データファイルを指定（既定: exeと同じフォルダの " + CrmStore.FileName + "）\r\n" +
 "  -h, --help               このヘルプを表示\r\n" +
 "\r\n" +
 "■ 終了コード\r\n" +
-"  0 = 該当あり・登録完了 / 1 = 該当なし / 2 = 顧客が複数該当（登録時） / 9 = エラー（標準エラー出力にメッセージ）\r\n" +
+"  0 = 該当あり・登録完了 / 1 = 該当なし / 2 = 顧客が複数該当・選択がキャンセル / 9 = エラー\r\n" +
 "\r\n" +
 "■ 例\r\n" +
 "  " + exe + " \"山田 太郎\"\r\n" +
-"  " + exe + " --phone 0312345678 --full\r\n" +
-"  " + exe + " --name 佐藤花子 --company テスト工業\r\n" +
 "  " + exe + " --any \"山田太郎,サンプル商事,03-1234-5678\" --full\r\n" +
-"  " + exe + " --add --name 山田太郎 --phone 03-1234-5678 --inquiry \"導入時期の相談\" --response \"来月初旬で合意\" --next \"キックオフ資料の送付\" --next-date 2026/09/18\r\n" +
-"  python:  subprocess.run([r\"" + exe + "\", \"--any\", \"山田太郎,0312345678\", \"--full\"], capture_output=True, encoding=\"utf-8\").stdout\r\n";
+"  " + exe + " --add --name 山田太郎 --phone 03-1234-5678 --set call_id=C12345 --set summary=\"導入時期の相談\"\r\n" +
+"  " + exe + " --add --name \"%CUSTOMER%\" --phone \"%ANI%\" --env-prefix " + DefaultEnvPrefix + "\r\n";
         }
+
+        // ------------------------------------------------------------------ 入出力
 
         static string NextArg(string[] args, ref int i, string opt)
         {
             if (i + 1 >= args.Length) throw new CliError(opt + " の後に値を指定してください");
             return args[++i];
+        }
+
+        /// <summary>次の引数が値かどうか（--show-env のように省略できるオプション用）</summary>
+        static string OptionalArg(string[] args, ref int i)
+        {
+            if (i + 1 < args.Length && !args[i + 1].StartsWith("-")) return args[++i];
+            return null;
         }
 
         /// <summary>値の中の \n（文字列）を改行にする</summary>
@@ -205,10 +231,7 @@ namespace CrmDemo
             s.Flush();
         }
 
-        /// <summary>
-        /// 標準エラー出力へ書く。標準出力と同じ文字コード（既定UTF-8、--encoding sjis で Shift_JIS）にそろえる。
-        /// コンソール表示時は画面の文字コードのまま出す。BOM は付けない。
-        /// </summary>
+        /// <summary>標準エラー出力へ書く（標準出力と同じ文字コード。BOMは付けない）</summary>
         static void WriteErr(string text, Encoding enc)
         {
             if (enc == null && !Console.IsErrorRedirected)
@@ -223,6 +246,99 @@ namespace CrmDemo
             s.Write(b, 0, b.Length);
             s.Flush();
         }
+
+        // ------------------------------------------------------------------ 環境変数
+
+        static readonly Regex EnvRefRe = new Regex("%([A-Za-z_][A-Za-z0-9_]*)%");
+        static readonly Regex EnvNameRe = new Regex("^[A-Za-z_][A-Za-z0-9_]*$");
+
+        /// <summary>値の中の %VAR% を環境変数の値に置き換える（exe を直接起動されると cmd が展開しないため）</summary>
+        static List<string> ExpandEnvRefs(Dictionary<string, string> values)
+        {
+            var warnings = new List<string>();
+            foreach (var key in values.Keys.ToList())
+            {
+                string text = values[key] ?? "";
+                var refs = EnvRefRe.Matches(text);
+                if (refs.Count > 0)
+                {
+                    foreach (Match m in refs)
+                        if (Environment.GetEnvironmentVariable(m.Groups[1].Value) == null)
+                            warnings.Add(string.Format("環境変数 %{0}% が定義されていないため、{1} には展開されない文字列が入りました。",
+                                m.Groups[1].Value, key));
+                    values[key] = EnvRefRe.Replace(text, m =>
+                        Environment.GetEnvironmentVariable(m.Groups[1].Value) ?? m.Value);
+                }
+                else if (EnvNameRe.IsMatch(text) && Environment.GetEnvironmentVariable(text) != null)
+                {
+                    warnings.Add(string.Format("{0} の値「{1}」は環境変数名と一致します。値ではなく名前が渡っています。%{1}% と書くか --env-prefix を使ってください。",
+                        key, text));
+                }
+            }
+            return warnings;
+        }
+
+        /// <summary>接頭辞に一致する環境変数を {変数名: 値} として取り込む（AMIVOICE_CS_SUMMARY → summary）</summary>
+        static Dictionary<string, string> ValuesFromEnv(List<string> prefixes, CrmData data, out List<string> unmatched)
+        {
+            var collected = new Dictionary<string, string>();
+            var un = new List<string>();
+            foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables())
+            {
+                string key = (string)e.Key;
+                foreach (var prefix in prefixes)
+                {
+                    if (!key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) continue;
+                    string suffix = key.Substring(prefix.Length).Trim('_');
+                    if (suffix.Length == 0) break;
+                    var f = data.FieldByApi(suffix);
+                    if (f != null) collected[f.ApiName] = (string)(e.Value ?? "");
+                    else un.Add(key);
+                    break;
+                }
+            }
+            unmatched = un.Distinct().OrderBy(x => x).ToList();
+            return collected;
+        }
+
+        static string ShowEnvText(string prefix, CrmData data)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("環境変数（" + (string.IsNullOrEmpty(prefix) ? "すべて" : "接頭辞 " + prefix + " に一致するもの") + "）");
+            sb.AppendLine(new string('-', 72));
+            var names = new List<string>();
+            foreach (System.Collections.DictionaryEntry e in Environment.GetEnvironmentVariables())
+            {
+                string key = (string)e.Key;
+                if (string.IsNullOrEmpty(prefix) || key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) names.Add(key);
+            }
+            names.Sort(StringComparer.OrdinalIgnoreCase);
+            if (names.Count == 0)
+            {
+                sb.AppendLine("該当する環境変数がありません。");
+                sb.AppendLine("音声認識システムから起動されたときだけ渡される変数は、手動で実行しても表示されません。");
+                sb.AppendLine("音声認識システム側のコマンドに次を登録して実行してください:");
+                sb.AppendLine("  " + ExeName + " --show-env " + (string.IsNullOrEmpty(prefix) ? DefaultEnvPrefix : prefix));
+            }
+            foreach (var key in names)
+            {
+                string value = Environment.GetEnvironmentVariable(key) ?? "";
+                string mark = "";
+                if (!string.IsNullOrEmpty(prefix) && key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    string suffix = key.Substring(prefix.Length).Trim('_');
+                    var f = data.FieldByApi(suffix);
+                    mark = f != null ? "  -> フィールド " + f.Label + "（" + f.ApiName + "）" : "  -> 対応するフィールドなし";
+                }
+                sb.AppendLine(string.Format("{0,-34} = {1}{2}", key, value.Length > 40 ? value.Substring(0, 40) + "…" : value, mark));
+            }
+            sb.AppendLine(new string('-', 72));
+            sb.AppendLine("接頭辞つきで取り込む場合:  " + ExeName + " --add --name ... --env-prefix " +
+                          (string.IsNullOrEmpty(prefix) ? DefaultEnvPrefix : prefix));
+            return sb.ToString();
+        }
+
+        // ------------------------------------------------------------------ 実行
 
         public static int Run(string[] args)
         {
@@ -261,17 +377,22 @@ namespace CrmDemo
                 else if (k == "-e" || k == "--encoding") info.Enc = ParseEncoding(args[i + 1]);
             }
 
-            bool full = false, header = true, list = false, all = false, rest = false, add = false;
-            string importFile = null;
+            bool full = false, header = true, list = false, all = false, rest = false, add = false, pick = false;
+            bool showFields = false, forceNew = false, noCreate = false, showEnv = false, sample = false;
+            int pickTimeout = 0;
+            bool condGiven = false;
+            string importFile = null, caseNumber = null, email = null, showEnvPrefix = null;
             Encoding enc = info.Enc;
             var names = new List<string>();
             var query = new SearchQuery();
-            var ad = new AddArgs();
+            var sets = new List<KeyValuePair<string, string>>();     // 変数名=値
+            var setEnv = new List<KeyValuePair<string, string>>();   // 変数名=環境変数名
+            var envPrefixes = new List<string>();
 
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
-                if (rest) { names.Add(a); continue; }
+                if (rest) { names.Add(a); condGiven = true; continue; }
                 switch (a.ToLowerInvariant())
                 {
                     case "-h": case "--help": case "/?": case "-?": case "/h":
@@ -282,11 +403,14 @@ namespace CrmDemo
                     case "--no-header": header = false; break;
                     case "--list": list = true; break;
                     case "--all": all = true; break;
-                    case "-n": case "--name": query.Names.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
-                    case "-c": case "--company": query.Companies.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
-                    case "-t": case "--phone": case "--tel": query.Phones.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
-                    case "-a": case "--any": query.Anys.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); break;
+                    case "--fields": showFields = true; break;
+                    case "--sample": sample = true; break;
+                    case "-n": case "--name": query.Names.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
+                    case "-c": case "--company": query.Companies.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
+                    case "-t": case "--phone": case "--tel": query.Phones.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
+                    case "-a": case "--any": query.Anys.AddRange(SearchQuery.Split(NextArg(args, ref i, a))); condGiven = true; break;
                     case "--id":
+                        condGiven = true;
                         foreach (var v in SearchQuery.Split(NextArg(args, ref i, a)))
                         {
                             int id;
@@ -295,15 +419,46 @@ namespace CrmDemo
                         }
                         break;
                     case "--add": add = true; break;
-                    case "--inquiry": ad.Inquiry = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
-                    case "--response": ad.Response = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
-                    case "--next": ad.Next = Unescape(NextArg(args, ref i, a)); ad.Given = true; break;
-                    case "--date": ad.DateText = NextArg(args, ref i, a); ad.Given = true; break;
-                    case "--next-date": ad.NextDateText = NextArg(args, ref i, a); ad.Given = true; break;
-                    case "--staff": ad.Staff = NextArg(args, ref i, a).Trim(); ad.Given = true; break;
-                    case "--email": ad.Email = NextArg(args, ref i, a).Trim(); ad.Given = true; break;
-                    case "--done": ad.Done = true; ad.Given = true; break;
-                    case "--create": ad.Create = true; ad.Given = true; break;
+                    case "--set":
+                        {
+                            string kv = NextArg(args, ref i, a);
+                            int eq = kv.IndexOf('=');
+                            if (eq <= 0) throw new CliError("--set は 変数名=値 の形で指定してください: " + kv);
+                            sets.Add(new KeyValuePair<string, string>(kv.Substring(0, eq).Trim(), Unescape(kv.Substring(eq + 1))));
+                            break;
+                        }
+                    case "--set-env":
+                        {
+                            string kv = NextArg(args, ref i, a);
+                            int eq = kv.IndexOf('=');
+                            if (eq <= 0) throw new CliError("--set-env は 変数名=環境変数名 の形で指定してください: " + kv);
+                            setEnv.Add(new KeyValuePair<string, string>(kv.Substring(0, eq).Trim(), kv.Substring(eq + 1).Trim()));
+                            break;
+                        }
+                    case "--env-prefix": envPrefixes.Add(OptionalArg(args, ref i) ?? DefaultEnvPrefix); break;
+                    case "--show-env": showEnv = true; showEnvPrefix = OptionalArg(args, ref i) ?? DefaultEnvPrefix; break;
+                    case "--case": caseNumber = NextArg(args, ref i, a).Trim(); break;
+                    case "--new": forceNew = true; break;
+                    case "--no-create": noCreate = true; break;
+                    case "--create": break;   // 既定で作成するので何もしない（旧版との互換）
+                    case "--email": email = NextArg(args, ref i, a).Trim(); break;
+                    case "--pick": pick = true; break;
+                    case "--pick-timeout":
+                        {
+                            string v = NextArg(args, ref i, a);
+                            if (!int.TryParse(v, out pickTimeout) || pickTimeout < 0)
+                                throw new CliError("--pick-timeout には0以上の秒数を指定してください: " + v);
+                            pick = true;
+                            break;
+                        }
+                    // 旧版の項目指定（既定のフィールドに対応づける）
+                    case "--inquiry": sets.Add(new KeyValuePair<string, string>("inquiry", Unescape(NextArg(args, ref i, a)))); break;
+                    case "--response": sets.Add(new KeyValuePair<string, string>("response", Unescape(NextArg(args, ref i, a)))); break;
+                    case "--next": sets.Add(new KeyValuePair<string, string>("next_action", Unescape(NextArg(args, ref i, a)))); break;
+                    case "--date": sets.Add(new KeyValuePair<string, string>("date", NextArg(args, ref i, a))); break;
+                    case "--next-date": sets.Add(new KeyValuePair<string, string>("next_date", NextArg(args, ref i, a))); break;
+                    case "--staff": sets.Add(new KeyValuePair<string, string>("staff", NextArg(args, ref i, a))); break;
+                    case "--done": sets.Add(new KeyValuePair<string, string>("status", "完了")); break;
                     case "-e": case "--encoding": NextArg(args, ref i, a); break;   // 先読み済み
                     case "--data": NextArg(args, ref i, a); break;                   // 先読み済み
                     case "--log": NextArg(args, ref i, a); break;                    // 先読み済み
@@ -312,28 +467,53 @@ namespace CrmDemo
                     case "--": rest = true; break;
                     default:
                         if (a.StartsWith("--")) throw new CliError("不明なオプション: " + a + "（--help で使い方を表示）");
-                        names.Add(a); break;
+                        // 変数名=値 の形は --set と同じ扱い（CSDemoCRM と同じ書き方）
+                        int p = a.IndexOf('=');
+                        if (p > 0 && !a.StartsWith("-"))
+                        {
+                            sets.Add(new KeyValuePair<string, string>(a.Substring(0, p).Trim(), Unescape(a.Substring(p + 1))));
+                            break;
+                        }
+                        names.Add(a); condGiven = true; break;
                 }
             }
-            // オプションなしの引数は空白でつないで1つの顧客名（"山田 太郎" と 山田 太郎 を同じに扱う）
             query.Names.AddRange(SearchQuery.Split(string.Join(" ", names)));
-            if (ad.Given && !add) throw new CliError("--inquiry / --response / --next などは --add と一緒に指定してください");
-
-            if (add) info.Mode = "add";
-            else if (importFile != null) info.Mode = "import";
-            else if (list) info.Mode = "list";
-            else if (all) info.Mode = "all";
 
             var store = new CrmStore(info.DataPath ?? CrmStore.ResolveDefaultPath());
             info.DataPath = store.FilePath;
+            var data = store.Data;
 
-            if (add) return RunAdd(store, query, ad, enc, info);
+            if (showEnv)
+            {
+                info.Mode = "show-env";
+                Write(ShowEnvText(showEnvPrefix, data), enc);
+                return ExitFound;
+            }
+
+            if (sample)
+            {
+                info.Mode = "sample";
+                var work = data.Clone();
+                var res = Importer.Apply(work, Importer.Parse(Samples.Csv(), work).Rows, null);
+                if (res.HasChanges) store.ReplaceData(work);
+                Write(res.Summary + "\r\n", enc);
+                info.Detail = res.Summary;
+                return ExitFound;
+            }
+
+            if (showFields)
+            {
+                info.Mode = "fields";
+                Write(BuildFieldsCsv(data), enc);
+                return ExitFound;
+            }
 
             if (importFile != null)
             {
+                info.Mode = "import";
                 if (!File.Exists(importFile)) throw new CliError("ファイルが見つかりません: " + importFile);
-                var parsed = Importer.Parse(Csv.ReadTextFile(importFile));
-                var work = store.Data.Clone();
+                var parsed = Importer.Parse(Csv.ReadTextFile(importFile), data);
+                var work = data.Clone();
                 var res = Importer.Apply(work, parsed.Rows, null);
                 if (res.HasChanges) store.ReplaceData(work);
                 var sb = new StringBuilder();
@@ -348,25 +528,62 @@ namespace CrmDemo
 
             if (list)
             {
-                string cl = BuildCustomerCsv(store.Data);
+                info.Mode = "list";
+                string cl = BuildCustomerCsv(data);
                 Write(header ? cl : StripHeader(cl), enc);
-                info.Detail = "顧客 " + store.Data.Customers.Count + " 件";
-                return store.Data.Customers.Count > 0 ? ExitFound : ExitNotFound;
+                info.Detail = "顧客 " + data.Customers.Count + " 件";
+                return data.Customers.Count > 0 ? ExitFound : ExitNotFound;
             }
 
+            if (add)
+            {
+                info.Mode = "add";
+                return RunAdd(store, query, sets, setEnv, envPrefixes, caseNumber, email, forceNew, noCreate,
+                              enc, info, pick, pickTimeout, condGiven);
+            }
+            if (sets.Count > 0 || setEnv.Count > 0 || envPrefixes.Count > 0 || caseNumber != null || forceNew)
+                throw new CliError("--set / --env-prefix / --case などは --add と一緒に指定してください");
+
             List<Customer> targets;
-            if (all) { targets = store.Data.Customers.ToList(); full = true; }
+            if (all) { targets = data.Customers.ToList(); full = true; info.Mode = "all"; }
             else
             {
                 if (query.IsEmpty)
-                    throw new CliError("検索条件（顧客名 / --name / --company / --phone / --any / --id）を指定してください（--help で使い方を表示）");
-                targets = store.Data.Search(query);
+                {
+                    if (!condGiven)
+                        throw new CliError("検索条件（顧客名 / --name / --company / --phone / --any / --id）を指定してください（--help で使い方を表示）");
+                    // 連携元が値を取り出せなかった場合（--any "," など）。呼び出し方の誤りではないので該当なしとして扱う
+                    Write(NotFoundMessage + "\r\n", enc);
+                    info.Detail = "検索条件の値が空のため該当なし";
+                    return ExitNotFound;
+                }
+                targets = data.Search(query);
+            }
+
+            string pickNote = "";
+            if (pick && targets.Count > 1)
+            {
+                Customer chosen;
+                Theme.LoadSetting(store.FilePath);
+                if (PickerForm.TryPick(targets, data,
+                        string.Format("検索条件に {0} 件の顧客が該当しました。ケースを出力する顧客を選んでください。", targets.Count),
+                        pickTimeout, out chosen))
+                {
+                    if (chosen == null)
+                    {
+                        Write(NotFoundMessage + "\r\n", enc);   // 連携先が扱いやすいよう、結果なしの出力は常に同じ1行
+                        info.Detail = string.Format("選択がキャンセルされました（候補 {0} 件）", targets.Count);
+                        return ExitAmbiguous;
+                    }
+                    pickNote = string.Format("（{0} 件から選択）", targets.Count);
+                    targets = new List<Customer> { chosen };
+                }
             }
 
             int count;
-            string csv = BuildHistoryCsv(store.Data, targets, full, header, out count);
-            info.Detail = string.Format("該当顧客 {0} 件・対応履歴 {1} 件{2}", targets.Count, count, count == 0 ? "（該当なし）" : "") +
-                          (targets.Count > 0 && targets.Count <= 5 ? "：" + string.Join("、", targets.Select(c => c.DisplayName)) : "");
+            string csv = BuildHistoryCsv(data, targets, full, header, out count);
+            info.Detail = string.Format("該当顧客 {0} 件・ケース {1} 件{2}", targets.Count, count, count == 0 ? "（該当なし）" : "") +
+                          (targets.Count > 0 && targets.Count <= 5 ? "：" + string.Join("、", targets.Select(c => c.DisplayName)) : "") + pickNote;
             if (count == 0)
             {
                 Write(NotFoundMessage + "\r\n", enc);
@@ -376,84 +593,176 @@ namespace CrmDemo
             return ExitFound;
         }
 
-        /// <summary>検索条件で顧客を1件に特定し、対応履歴を登録する</summary>
-        static int RunAdd(CrmStore store, SearchQuery q, AddArgs a, Encoding enc, RunInfo info)
+        /// <summary>顧客を特定（無ければ作成）して、ケースを起票または更新する</summary>
+        static int RunAdd(CrmStore store, SearchQuery q, List<KeyValuePair<string, string>> sets,
+                          List<KeyValuePair<string, string>> setEnv, List<string> envPrefixes,
+                          string caseNumber, string email, bool forceNew, bool noCreate,
+                          Encoding enc, RunInfo info, bool pick, int pickTimeout, bool condGiven)
         {
-            if (a.Inquiry.Length == 0 && a.Response.Length == 0 && a.Next.Length == 0)
-                throw new CliError("--inquiry / --response / --next のいずれかを指定してください");
-            if (q.IsEmpty)
-                throw new CliError("登録先の顧客を --name / --company / --phone / --any / --id で指定してください");
-            DateTime date = DateTime.Today;
-            if (a.DateText.Length > 0 && !TextUtil.TryParseDate(a.DateText, out date))
-                throw new CliError("対応日を解釈できません: " + a.DateText);
-            DateTime? next = null;
-            if (a.NextDateText.Length > 0)
-            {
-                DateTime nd;
-                if (!TextUtil.TryParseDate(a.NextDateText, out nd)) throw new CliError("次回確認日を解釈できません: " + a.NextDateText);
-                next = nd;
-            }
-
             var data = store.Data;
-            var hits = data.Search(q);
-            if (hits.Count > 1)
+            var warnings = new List<string>();
+            var values = new Dictionary<string, string>();
+            var unknown = new List<string>();
+
+            // 1) 値を集める（--env-prefix → --set-env → --set の順に上書き）
+            if (envPrefixes.Count > 0)
             {
-                var sb = new StringBuilder();
-                sb.Append("該当する顧客が複数います。--id か条件の追加で1件に絞ってください\r\n");
-                sb.Append(Csv.Line("顧客ID", "顧客名", "会社名", "電話番号"));
-                foreach (var h in hits) sb.Append(Csv.Line(h.Id.ToString(), h.Name, h.Company, h.Phone));
-                Write(sb.ToString(), enc);
-                info.Detail = "登録せず：顧客が複数該当（" + string.Join("、", hits.Select(h => "ID:" + h.Id + " " + h.DisplayName)) + "）";
-                return ExitAmbiguous;
+                List<string> unmatched;
+                foreach (var kv in ValuesFromEnv(envPrefixes, data, out unmatched)) values[kv.Key] = kv.Value;
+                if (unmatched.Count > 0)
+                    warnings.Add("対応するフィールドが無い環境変数: " + string.Join(", ", unmatched.Take(10).ToArray()));
+            }
+            foreach (var kv in setEnv)
+            {
+                var f = data.FieldByLabelOrApi(kv.Key);
+                if (f == null) { unknown.Add(kv.Key); continue; }
+                string v = Environment.GetEnvironmentVariable(kv.Value);
+                if (v == null) warnings.Add("環境変数 " + kv.Value + " が定義されていません（" + f.Label + " は設定しません）");
+                else values[f.ApiName] = v;
+            }
+            foreach (var kv in sets)
+            {
+                var f = data.FieldByLabelOrApi(kv.Key);
+                if (f == null) { unknown.Add(kv.Key); continue; }
+                values[f.ApiName] = kv.Value;
+            }
+            warnings.AddRange(ExpandEnvRefs(values));
+            if (unknown.Count > 0)
+                warnings.Add("定義されていない変数名は無視しました: " + string.Join(", ", unknown.Distinct().ToArray()) +
+                             "（--fields で一覧を確認できます）");
+            if (values.Count == 0)
+                throw new CliError("登録する値を --set 変数名=値 で指定してください（--fields で変数名の一覧を表示）");
+
+            // 値をフィールドの型にそろえる
+            foreach (var key in values.Keys.ToList())
+            {
+                var f = data.FieldByApi(key);
+                if (f != null) values[key] = FieldTypes.Normalize(f.Type, values[key]);
             }
 
-            Customer c;
-            bool created = false;
-            if (hits.Count == 0)
+            // 2) 更新先のケース（--case 指定 → キー項目の一致）
+            Case target = null;
+            if (!string.IsNullOrEmpty(caseNumber))
             {
-                if (!a.Create)
-                {
-                    Write("該当する顧客がいません（--create を付けると新規顧客として登録します）\r\n", enc);
-                    info.Detail = "登録せず：該当する顧客なし";
-                    return ExitNotFound;
-                }
-                if (q.Names.Count != 1) throw new CliError("新規顧客の登録には --name で顧客名を1つ指定してください");
-                c = data.AddCustomer(new Customer
-                {
-                    Name = q.Names[0], Company = q.Companies.Count == 1 ? q.Companies[0] : "",
-                    Phone = q.Phones.Count == 1 ? q.Phones[0] : "", Email = a.Email
-                });
-                created = true;
+                target = data.GetCaseByNumber(caseNumber);
+                if (target == null) throw new CliError("ケース番号が見つかりません: " + caseNumber);
+            }
+            else if (!forceNew)
+            {
+                var kf = data.KeyField;
+                if (kf != null && values.ContainsKey(kf.ApiName) && values[kf.ApiName].Length > 0)
+                    target = data.FindCaseByKey(values[kf.ApiName]);
+            }
+
+            // 3) 顧客の特定（更新対象のケースがあるときはその顧客）
+            Customer customer = null;
+            bool createdCustomer = false;
+            if (target != null)
+            {
+                customer = data.GetCustomer(target.CustomerId);
             }
             else
             {
-                c = hits[0];
-                // 空欄の項目だけ補完（登録済みの値は上書きしない）
-                if (c.Phone.Length == 0 && q.Phones.Count == 1) c.Phone = q.Phones[0];
-                if (c.Company.Length == 0 && q.Companies.Count == 1) c.Company = q.Companies[0];
-                if (c.Email.Length == 0 && a.Email.Length > 0) c.Email = a.Email;
-
-                string ni = TextUtil.Norm(a.Inquiry), nr = TextUtil.Norm(a.Response);
-                int cid = c.Id;
-                if (data.Interactions.Any(i => i.CustomerId == cid && i.Date == date &&
-                                               TextUtil.Norm(i.Inquiry) == ni && TextUtil.Norm(i.Response) == nr))
+                if (q.IsEmpty)
                 {
-                    Write(string.Format("同じ内容の対応履歴が登録済みのため、登録しませんでした（顧客ID:{0} {1}）\r\n", c.Id, c.DisplayName), enc);
-                    info.Detail = string.Format("登録せず：同じ内容が登録済み（顧客ID:{0} {1}）", c.Id, c.DisplayName);
-                    return ExitFound;
+                    if (!condGiven)
+                        throw new CliError("顧客を --name / --company / --phone / --any / --id で指定してください");
+                    Write(NotFoundMessage + "\r\n", enc);
+                    info.Detail = "登録せず：検索条件の値が空";
+                    return ExitNotFound;
+                }
+                var hits = data.Search(q);
+                if (hits.Count > 1 && pick)
+                {
+                    Customer chosen;
+                    Theme.LoadSetting(store.FilePath);
+                    if (PickerForm.TryPick(hits, data,
+                            string.Format("{0} 件の顧客が該当しました。ケースを起票する顧客を選んでください。", hits.Count),
+                            pickTimeout, out chosen))
+                    {
+                        if (chosen == null)
+                        {
+                            Write(NotFoundMessage + "\r\n", enc);
+                            info.Detail = string.Format("登録せず：選択がキャンセル（候補 {0} 件）", hits.Count);
+                            return ExitAmbiguous;
+                        }
+                        hits = new List<Customer> { chosen };
+                    }
+                }
+                if (hits.Count > 1)
+                {
+                    var sb = new StringBuilder();
+                    sb.Append("該当する顧客が複数います。--id か条件の追加で1件に絞ってください\r\n");
+                    sb.Append(Csv.Line("顧客ID", "顧客名", "会社名", "電話番号"));
+                    foreach (var h in hits) sb.Append(Csv.Line(h.Id.ToString(), h.Name, h.Company, h.Phone));
+                    Write(sb.ToString(), enc);
+                    info.Detail = "登録せず：顧客が複数該当（" + string.Join("、", hits.Select(h => "ID:" + h.Id + " " + h.DisplayName)) + "）";
+                    return ExitAmbiguous;
+                }
+                if (hits.Count == 1)
+                {
+                    customer = hits[0];
+                    // 空欄の項目だけ補完（登録済みの値は上書きしない）
+                    if (customer.Phone.Length == 0 && q.Phones.Count == 1) customer.Phone = q.Phones[0];
+                    if (customer.Company.Length == 0 && q.Companies.Count == 1) customer.Company = q.Companies[0];
+                    if (customer.Email.Length == 0 && !string.IsNullOrEmpty(email)) customer.Email = email;
+                }
+                else
+                {
+                    // 該当する顧客がいないので、指定された顧客名・会社名・電話番号で新規作成する
+                    if (noCreate)
+                    {
+                        Write(NotFoundMessage + "\r\n", enc);
+                        info.Detail = "登録せず：該当する顧客なし（--no-create 指定）";
+                        return ExitNotFound;
+                    }
+                    if (q.Names.Count != 1)
+                        throw new CliError("該当する顧客がいません。新規作成するには --name で顧客名を1つ指定してください（--no-create で作成しない）");
+                    customer = data.AddCustomer(new Customer
+                    {
+                        Name = q.Names[0],
+                        Company = q.Companies.Count == 1 ? q.Companies[0] : "",
+                        Phone = q.Phones.Count == 1 ? q.Phones[0] : "",
+                        Email = email ?? ""
+                    });
+                    createdCustomer = true;
                 }
             }
+            if (customer == null) throw new CliError("顧客を特定できませんでした");
 
-            var it = data.AddInteraction(new Interaction
+            // 4) ケースの作成・更新
+            string action;
+            if (target == null)
             {
-                CustomerId = c.Id, Date = date, Inquiry = a.Inquiry, Response = a.Response, NextAction = a.Next,
-                NextDate = next, Staff = a.Staff, Done = a.Done
-            });
+                target = new Case { CustomerId = customer.Id, Source = "cli" };
+                data.AddCase(target);
+                action = "起票";
+                // 必須の日付項目が指定されていなければ今日を入れる（音声連携では日付が渡らないことがある）
+                foreach (var f in data.SortedFields)
+                {
+                    if (!f.Required) continue;
+                    if (values.ContainsKey(f.ApiName) && values[f.ApiName].Length > 0) continue;
+                    if (f.Type == FieldTypes.Date) values[f.ApiName] = DateTime.Today.ToString("yyyy/MM/dd");
+                    else if (f.Type == FieldTypes.DateTimeType) values[f.ApiName] = DateTime.Now.ToString("yyyy/MM/dd HH:mm");
+                    else warnings.Add("必須項目 " + f.Label + "（" + f.ApiName + "）が指定されていません");
+                }
+            }
+            else
+            {
+                target.Source = "cli";
+                action = "更新";
+            }
+            foreach (var kv in values) target.Set(kv.Key, kv.Value);
+            target.UpdatedAt = DateTime.Now;
+            customer.UpdatedAt = DateTime.Now;
             store.Save();
-            string msg = string.Format("登録しました（{0}顧客ID:{1} {2}、対応履歴ID:{3}、対応日:{4}）",
-                created ? "新規顧客 " : "", c.Id, c.DisplayName, it.Id, TextUtil.Date(date));
+
+            string msg = string.Format("{0}しました（{1}顧客ID:{2} {3}、ケース番号:{4}）",
+                action, createdCustomer ? "新規顧客 " : "", customer.Id, customer.DisplayName, target.Number);
             Write(msg + "\r\n", enc);
-            info.Detail = msg;
+            foreach (var w in warnings) WriteErr("警告: " + w + "\r\n", enc);
+            info.Detail = msg + (warnings.Count > 0 ? "／警告 " + warnings.Count + " 件" : "") +
+                          "／設定: " + string.Join(",", values.Keys.ToArray());
             return ExitFound;
         }
 

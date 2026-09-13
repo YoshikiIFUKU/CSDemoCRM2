@@ -33,7 +33,7 @@ namespace CrmDemo
             var row = new List<string>();
             var sb = new StringBuilder();
             bool inQ = false, fieldStart = true, any = false;
-            int i = (text.Length > 0 && text[0] == '\uFEFF') ? 1 : 0;
+            int i = (text.Length > 0 && text[0] == '﻿') ? 1 : 0;
             for (; i < text.Length; i++)
             {
                 char ch = text[i];
@@ -95,24 +95,20 @@ namespace CrmDemo
 
         public static void WriteExcelCsv(string path, string content)
         {
-            File.WriteAllText(path, content, new UTF8Encoding(true)); // ExcelでそのままひらけるBOM付きUTF-8
+            File.WriteAllText(path, content, new UTF8Encoding(true)); // Excelでそのまま開けるBOM付きUTF-8
         }
     }
 
+    /// <summary>取り込む1行（顧客の項目＋ケースのフィールド値）</summary>
     public class ImportRow
     {
         public int LineNo;
+        public int? CustomerId;          // 顧客ID列（あれば顧客の特定に使う）
+        public string CaseNumber = "";   // ケース番号列（あれば既存ケースを更新）
         public string Name = "", Company = "", Phone = "", Email = "", Address = "", Memo = "";
-        public string DateText = "", Inquiry = "", Response = "", NextAction = "", NextDateText = "", Staff = "", StatusText = "";
+        public Dictionary<string, string> Values = new Dictionary<string, string>();   // 変数名 → 値
 
-        public bool HasInteraction
-        {
-            get
-            {
-                return DateText.Trim().Length > 0 || Inquiry.Trim().Length > 0 ||
-                       Response.Trim().Length > 0 || NextAction.Trim().Length > 0;
-            }
-        }
+        public bool HasCase { get { return Values.Any(v => !string.IsNullOrWhiteSpace(v.Value)); } }
     }
 
     public class ParsedImport
@@ -125,50 +121,35 @@ namespace CrmDemo
 
     public class ImportResult
     {
-        public int NewCustomers, UpdatedCustomers, NewInteractions, Duplicates, Errors;
+        public int NewCustomers, UpdatedCustomers, NewCases, UpdatedCases, Duplicates, Errors;
         public List<string> RowStatus = new List<string>();
 
         public string Summary
         {
             get
             {
-                return string.Format("新規顧客 {0} 件 / 顧客情報の補完 {1} 件 / 対応履歴の追加 {2} 件 / 重複スキップ {3} 件 / エラー {4} 件",
-                    NewCustomers, UpdatedCustomers, NewInteractions, Duplicates, Errors);
+                return string.Format("新規顧客 {0} 件 / 顧客情報の補完 {1} 件 / ケースの追加 {2} 件 / ケースの更新 {3} 件 / 重複スキップ {4} 件 / エラー {5} 件",
+                    NewCustomers, UpdatedCustomers, NewCases, UpdatedCases, Duplicates, Errors);
             }
         }
 
-        public bool HasChanges { get { return NewCustomers + UpdatedCustomers + NewInteractions > 0; } }
+        public bool HasChanges { get { return NewCustomers + UpdatedCustomers + NewCases + UpdatedCases > 0; } }
     }
 
-    /// <summary>CSV / タブ区切りテキストから顧客と対応履歴を取り込む</summary>
+    /// <summary>CSV / タブ区切りテキストから顧客とケースを取り込む</summary>
     public static class Importer
     {
-        public static readonly string[] DefaultOrder =
-            { "name", "company", "phone", "email", "date", "inquiry", "response", "next", "nextdate", "staff", "status" };
-        static readonly string[] DateFirstOrder =
-            { "date", "inquiry", "response", "next", "nextdate", "staff", "status" };
-
-        static readonly Dictionary<string, string> Alias = BuildAlias(
+        // 顧客の項目の別名（ケースの項目はフィールド定義の表示名・変数名で判定する）
+        static readonly Dictionary<string, string> CustomerAlias = BuildAlias(
             "name", "顧客名,お客様名,お客さま名,顧客,氏名,名前,お名前,customer,customername,name",
             "company", "会社名,会社,企業名,法人名,company,companyname,organization",
             "phone", "電話番号,電話,tel,phone,携帯,携帯番号,連絡先",
             "email", "メール,メールアドレス,email,e-mail,mail",
             "address", "住所,所在地,address",
             "memo", "備考,メモ,顧客メモ,memo,note,notes",
-            "date", "対応日,日付,対応日時,受付日,date",
-            "inquiry", "問い合わせ内容,問合せ内容,問い合せ内容,問い合わせ,問合せ,お問い合わせ内容,お問い合わせ,inquiry,question",
-            "response", "対応内容,対応,回答内容,回答,response,answer",
-            "next", "次回確認内容,次回確認,次回対応,次回確認事項,次回対応内容,nextaction,next",
-            "nextdate", "次回確認日,次回予定日,次回対応日,期限,nextdate,duedate",
-            "staff", "担当者,担当,staff,owner",
-            "status", "状態,ステータス,完了,status",
-            "ignore", "顧客id,id,対応件数,最終対応日,要フォロー");
-
-        public static readonly Dictionary<string, string> KeyLabel = new Dictionary<string, string> {
-            {"name","顧客名"},{"company","会社名"},{"phone","電話番号"},{"email","メール"},{"address","住所"},{"memo","備考"},
-            {"date","対応日"},{"inquiry","問い合わせ内容"},{"response","対応内容"},{"next","次回確認内容"},
-            {"nextdate","次回確認日"},{"staff","担当者"},{"status","状態"},{"ignore","(無視)"}
-        };
+            "id", "顧客id,customerid",
+            "case", "ケース番号,ケースid,casenumber,caseno",
+            "ignore", "id,ケース件数,対応件数,最終対応日,更新日時,登録元");
 
         static Dictionary<string, string> BuildAlias(params string[] kv)
         {
@@ -178,7 +159,24 @@ namespace CrmDemo
             return d;
         }
 
-        public static ParsedImport Parse(string text)
+        /// <summary>見出しの1セルを「顧客項目」か「ケースのフィールド」に対応づける。対応が無ければ null。</summary>
+        static string MapColumn(string header, CrmData data)
+        {
+            string key;
+            if (CustomerAlias.TryGetValue(TextUtil.Norm(header), out key)) return "c:" + key;
+            var f = data.FieldByLabelOrApi(header);
+            return f != null ? "f:" + f.ApiName : null;
+        }
+
+        /// <summary>見出しが無いときの既定の列順（顧客の4項目＋一覧に出しているフィールド）</summary>
+        static List<string> DefaultOrder(CrmData data)
+        {
+            var cols = new List<string> { "c:name", "c:company", "c:phone", "c:email" };
+            cols.AddRange(data.ListFields.Select(f => "f:" + f.ApiName));
+            return cols;
+        }
+
+        public static ParsedImport Parse(string text, CrmData data)
         {
             var p = new ParsedImport();
             if (string.IsNullOrWhiteSpace(text)) return p;
@@ -186,40 +184,77 @@ namespace CrmDemo
             var table = Csv.Parse(text, p.Delimiter);
             if (table.Count == 0) return p;
 
-            string[] map = null;
+            List<string> map;
             int start = 0;
-            var header = table[0].Select(h => { string k; return Alias.TryGetValue(TextUtil.Norm(h), out k) ? k : null; }).ToArray();
+            var header = table[0].Select(h => MapColumn(h, data)).ToList();
+            // 同じ対応先が2回出てきたら（顧客の「顧客名」とケースの「顧客名」など）、2つ目はフィールドとして扱う
+            var seen = new HashSet<string>();
+            for (int i = 0; i < header.Count; i++)
+            {
+                if (header[i] == null || seen.Add(header[i])) continue;
+                var dupField = data.FieldByLabelOrApi(table[0][i]);
+                header[i] = dupField != null && seen.Add("f:" + dupField.ApiName) ? "f:" + dupField.ApiName : null;
+            }
             int mapped = header.Count(k => k != null);
-            if (mapped >= 2 || (mapped == 1 && header.Contains("name")))
+            if (mapped >= 2 || (mapped == 1 && header.Contains("c:name")))
             {
                 map = header; start = 1; p.HasHeader = true;
             }
             else
             {
-                // 見出しなし: 先頭列が日付なら「対応日,問い合わせ内容,…」（このツールの標準出力と同じ形）とみなす
+                // 見出しなし。先頭列が日付なら「日付から始まるケースの列」（このツールの標準出力と同じ形）
                 var firstData = table.FirstOrDefault(r => r.Any(c => c.Trim().Length > 0));
                 DateTime dummy;
-                map = (firstData != null && TextUtil.TryParseDate(firstData[0], out dummy)) ? DateFirstOrder : DefaultOrder;
+                if (firstData != null && TextUtil.TryParseDate(firstData[0], out dummy))
+                    map = data.ListFields.Select(f => "f:" + f.ApiName).ToList();
+                else
+                    map = DefaultOrder(data);
             }
-            p.Columns = map.Select(k => k == null ? "(無視)" : KeyLabel[k]).ToList();
+            p.Columns = map.Select(k => k == null ? "(無視)" : ColumnLabel(k, data)).ToList();
 
             for (int r = start; r < table.Count; r++)
             {
                 var cells = table[r];
                 if (!cells.Any(c => c.Trim().Length > 0)) continue;
                 var row = new ImportRow { LineNo = r + 1 };
-                for (int c = 0; c < cells.Count && c < map.Length; c++)
-                    Set(row, map[c], cells[c]);
+                for (int c = 0; c < cells.Count && c < map.Count; c++) Set(row, map[c], cells[c], data);
                 p.Rows.Add(row);
             }
             return p;
         }
 
-        static void Set(ImportRow r, string key, string v)
+        static string ColumnLabel(string key, CrmData data)
+        {
+            if (key.StartsWith("c:"))
+            {
+                switch (key.Substring(2))
+                {
+                    case "name": return "顧客名";
+                    case "company": return "会社名";
+                    case "phone": return "電話番号";
+                    case "email": return "メール";
+                    case "address": return "住所";
+                    case "memo": return "備考";
+                    case "id": return "顧客ID";
+                    case "case": return "ケース番号";
+                    default: return "(無視)";
+                }
+            }
+            var f = data.FieldByApi(key.Substring(2));
+            return f != null ? f.Label : "(無視)";
+        }
+
+        static void Set(ImportRow r, string key, string v, CrmData data)
         {
             if (key == null) return;
             v = v ?? "";
-            switch (key)
+            if (key.StartsWith("f:"))
+            {
+                var f = data.FieldByApi(key.Substring(2));
+                if (f != null) r.Values[f.ApiName] = FieldTypes.Normalize(f.Type, v);
+                return;
+            }
+            switch (key.Substring(2))
             {
                 case "name": r.Name = v.Trim(); break;
                 case "company": r.Company = v.Trim(); break;
@@ -227,21 +262,14 @@ namespace CrmDemo
                 case "email": r.Email = v.Trim(); break;
                 case "address": r.Address = v.Trim(); break;
                 case "memo": r.Memo = v; break;
-                case "date": r.DateText = v.Trim(); break;
-                case "inquiry": r.Inquiry = v.Trim(); break;
-                case "response": r.Response = v.Trim(); break;
-                case "next": r.NextAction = v.Trim(); break;
-                case "nextdate": r.NextDateText = v.Trim(); break;
-                case "staff": r.Staff = v.Trim(); break;
-                case "status": r.StatusText = v.Trim(); break;
+                case "case": r.CaseNumber = v.Trim(); break;
+                case "id":
+                    {
+                        int id;
+                        if (int.TryParse(v.Trim(), out id)) r.CustomerId = id;
+                        break;
+                    }
             }
-        }
-
-        static bool IsDone(string s)
-        {
-            string n = TextUtil.Norm(s);
-            return n == "完了" || n == "済" || n == "済み" || n == "対応済" || n == "対応済み" || n == "done" ||
-                   n == "true" || n == "1" || n == "○" || n == "yes" || n == "closed";
         }
 
         /// <summary>空欄の項目だけ新しい値で埋める（既存の値は上書きしない）</summary>
@@ -253,7 +281,10 @@ namespace CrmDemo
 
         /// <summary>
         /// 取り込みを data に適用する。プレビューでは data.Clone() に適用して結果だけ見る。
-        /// 同じ「顧客名＋会社名」は同一顧客、同じ顧客・対応日・問い合わせ内容・対応内容の履歴は重複としてスキップ。
+        ///
+        /// 顧客: 顧客ID列があればそれで特定。無ければ「顧客名＋会社名」で特定し、無ければ新規作成。
+        /// ケース: ケース番号列があればそのケースを更新。無ければキー項目（call_id など）が一致するケースを更新。
+        ///         どちらも無ければ新規。指定した項目の値がすべて同じケースがあれば重複としてスキップ。
         /// </summary>
         public static ImportResult Apply(CrmData data, List<ImportRow> rows, int? defaultCustomerId)
         {
@@ -263,37 +294,60 @@ namespace CrmDemo
 
             foreach (var row in rows)
             {
-                // 1) 履歴部分の検証（エラー行で顧客だけ作られないよう先に行う）
-                DateTime date = DateTime.Today;
-                DateTime? next = null;
-                if (row.HasInteraction)
+                // 1) 必須フィールドの確認（エラー行で顧客だけ作られないよう先に行う）
+                if (row.HasCase)
                 {
-                    if (!TextUtil.TryParseDate(row.DateText, out date))
+                    var missing = data.SortedFields
+                        .Where(f => f.Required && string.IsNullOrWhiteSpace(row.Values.ContainsKey(f.ApiName) ? row.Values[f.ApiName] : ""))
+                        .Select(f => f.Label).ToList();
+                    if (missing.Count > 0)
                     {
                         res.Errors++;
-                        res.RowStatus.Add(row.DateText.Length == 0 ? "エラー: 対応日がありません" : "エラー: 対応日を解釈できません「" + row.DateText + "」");
+                        res.RowStatus.Add("エラー: " + string.Join("・", missing.ToArray()) + " がありません");
                         continue;
-                    }
-                    if (row.NextDateText.Length > 0)
-                    {
-                        DateTime nd;
-                        if (!TextUtil.TryParseDate(row.NextDateText, out nd))
-                        {
-                            res.Errors++;
-                            res.RowStatus.Add("エラー: 次回確認日を解釈できません「" + row.NextDateText + "」");
-                            continue;
-                        }
-                        next = nd;
                     }
                 }
 
-                // 2) 顧客の特定・作成
-                Customer c = null;
-                string custStatus;
-                if (row.Name.Length == 0)
+                // 2) 更新するケース（ケース番号の指定があれば最優先）
+                Case target = null;
+                if (row.CaseNumber.Length > 0)
                 {
-                    if (defaultCustomerId.HasValue) c = data.GetCustomer(defaultCustomerId.Value);
-                    if (c == null || !row.HasInteraction)
+                    target = data.GetCaseByNumber(row.CaseNumber);
+                    if (target == null && !row.HasCase)
+                    {
+                        res.Errors++;
+                        res.RowStatus.Add("エラー: ケース番号が見つかりません（" + row.CaseNumber + "）");
+                        continue;
+                    }
+                }
+
+                // 3) 顧客の特定・作成
+                Customer c = null;
+                string custStatus = "既存顧客";
+                if (target != null) c = data.GetCustomer(target.CustomerId);
+                if (c == null && row.CustomerId.HasValue)
+                {
+                    c = data.GetCustomer(row.CustomerId.Value);
+                    if (c == null)
+                    {
+                        res.Errors++;
+                        res.RowStatus.Add("エラー: 顧客IDが見つかりません（" + row.CustomerId.Value + "）");
+                        continue;
+                    }
+                }
+                if (c != null)
+                {
+                    // 顧客ID・ケース番号で特定済み。空欄の項目だけ補完する
+                    bool upd0 = Fill(ref c.Phone, row.Phone) | Fill(ref c.Email, row.Email) |
+                                Fill(ref c.Address, row.Address) | Fill(ref c.Memo, row.Memo) | Fill(ref c.Company, row.Company);
+                    if (upd0) c.UpdatedAt = DateTime.Now;
+                    if (upd0 && !created.Contains(c.Id) && updated.Add(c.Id)) res.UpdatedCustomers++;
+                    custStatus = upd0 ? "既存顧客(情報補完)" : "既存顧客";
+                }
+                else if (row.Name.Length == 0)
+                {
+                    c = defaultCustomerId.HasValue ? data.GetCustomer(defaultCustomerId.Value) : null;
+                    if (c == null || !row.HasCase)
                     {
                         res.Errors++;
                         res.RowStatus.Add("エラー: 顧客名がありません");
@@ -326,79 +380,133 @@ namespace CrmDemo
                                    Fill(ref c.Address, row.Address) | Fill(ref c.Memo, row.Memo) | Fill(ref c.Company, row.Company);
                         if (upd) c.UpdatedAt = DateTime.Now;
                         if (upd && !created.Contains(c.Id) && updated.Add(c.Id)) res.UpdatedCustomers++;
-                        custStatus = created.Contains(c.Id) ? "新規顧客" : (upd ? "既存顧客(情報補完)" : "既存顧客");
+                        custStatus = upd ? "既存顧客(情報補完)" : "既存顧客";
                     }
                 }
 
-                // 3) 対応履歴の追加
-                if (!row.HasInteraction)
+                // 4) ケースの追加・更新
+                if (!row.HasCase)
                 {
-                    res.RowStatus.Add(custStatus + "（履歴なし）");
+                    res.RowStatus.Add(custStatus + "（ケースなし）");
                     continue;
                 }
-                string ni = TextUtil.Norm(row.Inquiry), nr = TextUtil.Norm(row.Response);
+
+                // キー項目（call_id など）が一致するケースがあれば、それを更新する
+                if (target == null)
+                {
+                    var kf = data.KeyField;
+                    if (kf != null && row.Values.ContainsKey(kf.ApiName) && row.Values[kf.ApiName].Length > 0)
+                    {
+                        var byKey = data.FindCaseByKey(row.Values[kf.ApiName]);
+                        if (byKey != null && byKey.CustomerId == c.Id) target = byKey;
+                    }
+                }
+
+                var given = row.Values.Where(v => !string.IsNullOrWhiteSpace(v.Value)).ToList();
+                if (target != null)
+                {
+                    if (given.All(g => TextUtil.Norm(target.Get(g.Key)) == TextUtil.Norm(g.Value)))
+                    {
+                        res.Duplicates++;
+                        res.RowStatus.Add(custStatus + " / 同じ内容のためスキップ（" + target.Number + "）");
+                        continue;
+                    }
+                    foreach (var v in row.Values) target.Set(v.Key, v.Value);
+                    target.UpdatedAt = DateTime.Now;
+                    res.UpdatedCases++;
+                    res.RowStatus.Add(custStatus + " / ケースを更新（" + target.Number + "）");
+                    continue;
+                }
+
                 int cid = c.Id;
-                bool dup = data.Interactions.Any(i => i.CustomerId == cid && i.Date == date &&
-                                                      TextUtil.Norm(i.Inquiry) == ni && TextUtil.Norm(i.Response) == nr);
+                bool dup = data.Cases.Any(x => x.CustomerId == cid &&
+                                               given.All(g => TextUtil.Norm(x.Get(g.Key)) == TextUtil.Norm(g.Value)));
                 if (dup)
                 {
                     res.Duplicates++;
                     res.RowStatus.Add(custStatus + " / 重複のためスキップ");
                     continue;
                 }
-                data.AddInteraction(new Interaction
-                {
-                    CustomerId = c.Id, Date = date, Inquiry = row.Inquiry, Response = row.Response,
-                    NextAction = row.NextAction, NextDate = next, Staff = row.Staff, Done = IsDone(row.StatusText)
-                });
-                res.NewInteractions++;
-                res.RowStatus.Add(custStatus + " / 履歴を追加");
+                var newCase = new Case { CustomerId = c.Id, Source = "import" };
+                data.AddCase(newCase);
+                foreach (var v in row.Values) newCase.Set(v.Key, v.Value);
+                res.NewCases++;
+                res.RowStatus.Add(custStatus + " / ケースを追加（" + newCase.Number + "）");
             }
             return res;
         }
     }
 
-    /// <summary>デモ用サンプルデータ（日付は今日を基準に生成するので、いつ使ってもフォローアップ一覧が埋まる）</summary>
+    /// <summary>デモ用サンプルデータ（日付は今日を基準に生成するので、いつ使っても自然な並びになる）</summary>
     public static class Samples
     {
         public static string Csv()
         {
             var sb = new StringBuilder();
-            sb.Append(CrmDemo.Csv.Line("顧客名", "会社名", "電話番号", "メール", "対応日", "問い合わせ内容", "対応内容", "次回確認内容", "次回確認日", "担当者", "状態"));
-            Action<string, string, string, string, int, string, string, string, int?, string, bool> R =
-                (name, co, tel, mail, ago, inq, resp, next, nextIn, staff, done) =>
-                sb.Append(CrmDemo.Csv.Line(name, co, tel, mail, TextUtil.Date(DateTime.Today.AddDays(-ago)), inq, resp, next,
-                    nextIn.HasValue ? TextUtil.Date(DateTime.Today.AddDays(nextIn.Value)) : "", staff, done ? "完了" : "未完了"));
+            sb.Append(CrmDemo.Csv.Line("顧客名", "会社名", "電話番号", "メール",
+                "call_id", "subject", "call_date", "operator_name", "customer_name", "category",
+                "summary", "response", "next_action", "detail_url"));
+            int seq = 1001;
+            // (顧客名, 会社名, 電話番号, メール, 何日前, 時刻, 件名, オペレータ, 用件区分, 問い合わせ内容, 対応内容, 次回確認内容)
+            Action<string, string, string, string, int, string, string, string, string, string, string, string> R =
+                (name, co, tel, mail, ago, time, subject, op, category, summary, response, next) =>
+                {
+                    string id = "C-" + (seq++);
+                    sb.Append(CrmDemo.Csv.Line(name, co, tel, mail, id, subject,
+                        DateTime.Today.AddDays(-ago).ToString("yyyy/MM/dd") + " " + time, op, name, category,
+                        summary, response, next, "https://example.com/calls/" + id));
+                };
 
             string y = "山田 太郎", yc = "株式会社サンプル商事", yt = "03-1234-5678", ym = "yamada@sample-shoji.example";
-            R(y, yc, yt, ym, 60, "新システムの導入を検討中。製品資料を送ってほしい。", "製品資料と価格表をメールで送付。", "資料の確認状況をヒアリング", -46, "田村", true);
-            R(y, yc, yt, ym, 45, "資料を確認した。10名規模での見積もりがほしい。", "10ユーザー・年間契約で見積書を作成し送付。", "見積もりの社内検討結果を確認", -25, "田村", true);
-            R(y, yc, yt, ym, 20, "見積もり金額について、上長から値引きの可否を聞かれている。", "年間一括払いなら5%割引が可能と回答。導入支援プランも併せて提案。", "稟議の進捗を確認", -3, "田村", false);
-            R(y, yc, yt, ym, 5, "稟議が通りそう。導入スケジュールを知りたい。", "最短2週間の導入スケジュール案を送付。\nキックオフ日程の候補を3つ提示。", "キックオフ日程の確定", 2, "田村", false);
+            R(y, yc, yt, ym, 60, "10:15", "製品資料の請求", "田村", "問い合わせ",
+              "新システムの導入を検討中。製品資料を送ってほしい。", "製品資料と価格表をメールで送付。", "資料の確認状況をヒアリング");
+            R(y, yc, yt, ym, 45, "14:30", "見積もり依頼（10名）", "田村", "問い合わせ",
+              "資料を確認した。10名規模での見積もりがほしい。", "10ユーザー・年間契約で見積書を作成し送付。", "見積もりの社内検討結果を確認");
+            R(y, yc, yt, ym, 20, "11:05", "見積もりの値引き相談", "田村", "問い合わせ",
+              "見積もり金額について、上長から値引きの可否を聞かれている。", "年間一括払いなら5%割引が可能と回答。導入支援プランも併せて提案。", "稟議の進捗を確認");
+            R(y, yc, yt, ym, 5, "16:40", "導入スケジュールの相談", "田村", "申込",
+              "稟議が通りそう。導入スケジュールを知りたい。", "最短2週間の導入スケジュール案を送付。\nキックオフ日程の候補を3つ提示。", "キックオフ日程の確定");
 
-            string s = "佐藤 花子";
-            R(s, "有限会社テスト工業", "06-2345-6789", "sato@test-kogyo.example", 30, "ログインできない。", "パスワード再設定の手順を案内し、ログインできることを確認。", "", null, "鈴木", true);
-            R(s, "有限会社テスト工業", "06-2345-6789", "sato@test-kogyo.example", 12, "CSV出力をExcelで開くと文字化けする。", "Excelで開く際の手順（UTF-8指定）を案内。BOM付き出力の設定も紹介。", "設定変更後に解消したか確認", -1, "鈴木", false);
-            R(s, "みらいデザイン株式会社", "045-111-2222", "hanako.sato@mirai-design.example", 15, "デザイン部門5名での利用を検討。無料トライアルは可能か。", "30日間の無料トライアルアカウントを発行。", "トライアル中の利用状況を確認", 10, "田村", false);
+            string s = "佐藤 花子", sc = "有限会社テスト工業", st = "06-2345-6789", sm = "sato@test-kogyo.example";
+            R(s, sc, st, sm, 30, "09:20", "ログインできない", "鈴木", "問い合わせ",
+              "ログインできない。", "パスワード再設定の手順を案内し、ログインできることを確認。", "");
+            R(s, sc, st, sm, 12, "13:45", "CSVの文字化け", "鈴木", "問い合わせ",
+              "CSV出力をExcelで開くと文字化けする。", "Excelで開く際の手順（UTF-8指定）を案内。BOM付き出力の設定も紹介。", "設定変更後に解消したか確認");
+            R(s, "みらいデザイン株式会社", "045-111-2222", "hanako.sato@mirai-design.example", 15, "15:10",
+              "無料トライアルの相談", "田村", "申込",
+              "デザイン部門5名での利用を検討。無料トライアルは可能か。", "30日間の無料トライアルアカウントを発行。", "トライアル中の利用状況を確認");
 
             string k = "鈴木 一郎", kt = "090-1111-2222", km = "ichiro.suzuki@mail.example";
-            R(k, "", kt, km, 40, "個人事業主向けのプランはあるか。", "個人向けライトプランを案内。", "申し込み意向の確認", -33, "佐々木", true);
-            R(k, "", kt, km, 25, "ライトプランに申し込みたい。", "申込フォームを案内し、申し込み完了を確認。", "初期設定のフォロー電話", -18, "佐々木", true);
-            R(k, "", kt, km, 18, "初期設定の方法がわからない。", "電話で画面共有しながら初期設定を完了。", "", null, "佐々木", true);
+            R(k, "", kt, km, 40, "10:50", "個人事業主向けプラン", "佐々木", "問い合わせ",
+              "個人事業主向けのプランはあるか。", "個人向けライトプランを案内。", "申し込み意向の確認");
+            R(k, "", kt, km, 25, "11:30", "ライトプランの申し込み", "佐々木", "申込",
+              "ライトプランに申し込みたい。", "申込フォームを案内し、申し込み完了を確認。", "初期設定のフォロー電話");
+            R(k, "", kt, km, 18, "17:05", "初期設定のサポート", "佐々木", "問い合わせ",
+              "初期設定の方法がわからない。", "電話で画面共有しながら初期設定を完了。", "");
 
-            string t = "高橋 美咲", tc = "株式会社ネクストソリューション", tt = "052-333-4444", tm = "m.takahashi@next-sol.example";
-            R(t, tc, tt, tm, 50, "既存システムからのデータ移行について相談したい。", "移行ツールの仕様書を送付。項目対応表の作成を依頼。", "項目対応表の受領", -40, "鈴木", true);
-            R(t, tc, tt, tm, 35, "項目対応表を送付した。", "移行テストを実施し、日付形式の差異を2件検出。先方へ修正を依頼。", "修正版データの受領", -12, "鈴木", true);
-            R(t, tc, tt, tm, 10, "修正版データを送付した。", "本番移行を完了。件数が一致することを確認済み。", "移行後1週間の利用状況ヒアリング", 0, "鈴木", false);
-            R(t, tc, tt, tm, 2, "一部のユーザーに権限が付与されていない。", "権限設定を修正し、該当ユーザーでの動作を確認。", "他ユーザーへの影響がないか確認", 5, "鈴木", false);
+            string t2 = "高橋 美咲", tc = "株式会社ネクストソリューション", tt = "052-333-4444", tm = "m.takahashi@next-sol.example";
+            R(t2, tc, tt, tm, 50, "13:00", "データ移行の相談", "鈴木", "問い合わせ",
+              "既存システムからのデータ移行について相談したい。", "移行ツールの仕様書を送付。項目対応表の作成を依頼。", "項目対応表の受領");
+            R(t2, tc, tt, tm, 35, "10:25", "移行テストの結果", "鈴木", "問い合わせ",
+              "項目対応表を送付した。", "移行テストを実施し、日付形式の差異を2件検出。先方へ修正を依頼。", "修正版データの受領");
+            R(t2, tc, tt, tm, 10, "14:15", "本番移行の完了", "鈴木", "変更",
+              "修正版データを送付した。", "本番移行を完了。件数が一致することを確認済み。", "移行後1週間の利用状況ヒアリング");
+            R(t2, tc, tt, tm, 2, "09:40", "権限が付与されていない", "鈴木", "クレーム",
+              "一部のユーザーに権限が付与されていない。", "権限設定を修正し、該当ユーザーでの動作を確認。", "他ユーザーへの影響がないか確認");
 
-            R("田中 健", "田中建設株式会社", "011-555-6666", "ken.tanaka@tanaka-kensetsu.example", 90, "展示会で名刺交換。", "お礼メールと会社案内を送付。", "3か月後に導入意向を再確認", 1, "佐々木", false);
+            R("田中 健", "田中建設株式会社", "011-555-6666", "ken.tanaka@tanaka-kensetsu.example", 90, "16:00",
+              "展示会でのご挨拶", "佐々木", "その他",
+              "展示会で名刺交換。", "お礼メールと会社案内を送付。", "3か月後に導入意向を再確認");
 
             string i = "伊藤 由美", ic = "株式会社グリーンフーズ", it = "092-777-8888", im = "yumi.ito@green-foods.example";
-            R(i, ic, it, im, 22, "請求書の送付先を経理部に変更したい。", "送付先を経理部宛に変更し、請求書を再発行。", "", null, "田村", true);
-            R(i, ic, it, im, 8, "契約更新にあたり、値上げの予定はあるか。", "来年度も現行価格で据え置きと回答。", "更新契約書の返送確認", 14, "田村", false);
+            R(i, ic, it, im, 22, "11:50", "請求書の送付先変更", "田村", "変更",
+              "請求書の送付先を経理部に変更したい。", "送付先を経理部宛に変更し、請求書を再発行。", "");
+            R(i, ic, it, im, 8, "15:35", "契約更新時の価格", "田村", "問い合わせ",
+              "契約更新にあたり、値上げの予定はあるか。", "来年度も現行価格で据え置きと回答。", "更新契約書の返送確認");
 
-            R("渡辺 誠", "ブルーオーシャン合同会社", "03-9876-5432", "makoto.w@blue-ocean.example", 3, "利用頻度が低いので解約を検討している。", "利用状況を確認し、下位プランへの変更を提案。", "プラン変更か解約かの回答を確認", 4, "鈴木", false);
+            R("渡辺 誠", "ブルーオーシャン合同会社", "03-9876-5432", "makoto.w@blue-ocean.example", 3, "10:05",
+              "解約の相談", "鈴木", "解約",
+              "利用頻度が低いので解約を検討している。", "利用状況を確認し、下位プランへの変更を提案。", "プラン変更か解約かの回答を確認");
             return sb.ToString();
         }
     }

@@ -10,8 +10,8 @@ if not exist "%CSC%" (
 )
 if not exist dist mkdir dist
 "%CSC%" /nologo /target:exe /platform:anycpu /optimize+ /codepage:65001 ^
-  /win32manifest:src\app.manifest /out:dist\CrmDemo.exe ^
+  /win32manifest:src\app.manifest /out:dist\CSDemoCRM2.exe ^
   /r:System.dll /r:System.Core.dll /r:System.Xml.dll /r:System.Drawing.dll /r:System.Windows.Forms.dll ^
   src\*.cs
 if errorlevel 1 exit /b 1
-echo Built: %CD%\dist\CrmDemo.exe
+echo Built: %CD%\dist\CSDemoCRM2.exe

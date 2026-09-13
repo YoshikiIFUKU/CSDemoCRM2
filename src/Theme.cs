@@ -79,14 +79,10 @@ namespace CrmDemo
 
         public static void LoadSetting(string dataFilePath)
         {
-            settingsPath = Path.Combine(Path.GetDirectoryName(dataFilePath), "crm_settings.ini");
+            Settings.Load(dataFilePath);
+            settingsPath = dataFilePath;
             ThemeMode m = ThemeMode.System;
-            try
-            {
-                if (File.Exists(settingsPath))
-                    foreach (var line in File.ReadAllLines(settingsPath))
-                        if (line.StartsWith("theme=")) Enum.TryParse(line.Substring(6).Trim(), true, out m);
-            }
+            try { Enum.TryParse(Settings.Get("theme", "System"), true, out m); }
             catch { }
             Set(m, false);
             // 「Windows の設定に合わせる」のときは、Windows 側の切り替えに追従する
@@ -99,7 +95,7 @@ namespace CrmDemo
         static void SaveSetting()
         {
             if (settingsPath == null) return;
-            try { File.WriteAllText(settingsPath, "theme=" + Mode + "\r\n"); } catch { }
+            Settings.Set("theme", Mode.ToString());   // 列の設定と同じファイルに保存する
         }
 
         // ---- 画面への適用

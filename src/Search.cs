@@ -208,7 +208,7 @@ namespace CrmDemo
             int count;
             string csv = Cli.BuildHistoryCsv(data, hits, chkFull.Checked, true, out count);
             lblHit.Text = hits.Count == 0 ? "該当する顧客はいません"
-                : string.Format("該当顧客 {0} 件（{1}）／ 対応履歴 {2} 件", hits.Count, string.Join("、", hits.Select(c => c.DisplayName)), count);
+                : string.Format("該当顧客 {0} 件（{1}）／ ケース {2} 件", hits.Count, string.Join("、", hits.Select(c => c.DisplayName)), count);
             lastOutput = count == 0 ? Cli.NotFoundMessage + "\r\n" : csv;
             tOut.Text = lastOutput.Replace("\r\n", "\n").Replace("\n", "\r\n");
         }

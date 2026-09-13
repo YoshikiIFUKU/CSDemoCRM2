@@ -3,10 +3,10 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 
-[assembly: AssemblyTitle("CRM Demo")]
-[assembly: AssemblyProduct("CRM Demo - 顧客対応履歴管理")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyTitle("CSDemoCRM2")]
+[assembly: AssemblyProduct("CSDemoCRM2 - 顧客・ケース管理")]
+[assembly: AssemblyVersion("2.0.0.0")]
+[assembly: AssemblyFileVersion("2.0.0.0")]
 
 namespace CrmDemo
 {
@@ -32,7 +32,7 @@ namespace CrmDemo
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.ThreadException += (s, e) =>
-                MessageBox.Show("エラーが発生しました。\r\n\r\n" + e.Exception.Message, "CRM Demo",
+                MessageBox.Show("エラーが発生しました。\r\n\r\n" + e.Exception.Message, "CSDemoCRM2",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
 
             CrmStore store;
@@ -42,7 +42,7 @@ namespace CrmDemo
             {
                 MessageBox.Show("データファイルを読み込めませんでした。\r\n" + path + "\r\n\r\n" + ex.Message +
                     "\r\n\r\n同じフォルダの " + CrmStore.FileName + ".bak（直前の版）から復元できます。",
-                    "CRM Demo", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    "CSDemoCRM2", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return Cli.ExitError;
             }
             Theme.LoadSetting(store.FilePath);

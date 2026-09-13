@@ -155,21 +155,21 @@ namespace CrmDemo
 
         public static void Warn(IWin32Window owner, string msg)
         {
-            MessageBox.Show(owner, msg, "CRM Demo", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(owner, msg, "CSDemoCRM2", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         public static void Info(IWin32Window owner, string msg)
         {
-            MessageBox.Show(owner, msg, "CRM Demo", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(owner, msg, "CSDemoCRM2", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         public static bool Confirm(IWin32Window owner, string msg, MessageBoxIcon icon = MessageBoxIcon.Question)
         {
-            return MessageBox.Show(owner, msg, "CRM Demo", MessageBoxButtons.YesNo, icon, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
+            return MessageBox.Show(owner, msg, "CSDemoCRM2", MessageBoxButtons.YesNo, icon, MessageBoxDefaultButton.Button2) == DialogResult.Yes;
         }
     }
 
-    /// <summary>顧客の新規登録・編集</summary>
+    /// <summary>顧客の新規登録・編集（顧客の項目は固定）</summary>
     public class CustomerForm : Form
     {
         readonly CrmData data;
@@ -217,87 +217,6 @@ namespace CrmDemo
         }
     }
 
-    /// <summary>対応履歴の追加・編集</summary>
-    public class InteractionForm : Form
-    {
-        readonly DateTimePicker dtDate, dtNext;
-        readonly TextBox tStaff, tInquiry, tResponse, tNext;
-        readonly CheckBox chkDone;
-        public Interaction Result { get; private set; }
-
-        public InteractionForm(Interaction it, Customer c, string defaultStaff)
-        {
-            Ui.SetupDialog(this, it == null ? "対応履歴の追加" : "対応履歴の編集", 640, 620);
-            bool isNew = it == null;
-            it = it ?? new Interaction { Staff = defaultStaff ?? "" };
-
-            var head = new Label
-            {
-                Text = "顧客: " + c.DisplayName, Font = Ui.BoldFont, Dock = DockStyle.Top, AutoSize = false,
-                Height = Ui.S(28), Tag = "accent"
-            };
-
-            var t = Ui.FormTable();
-            dtDate = new DateTimePicker { Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy/MM/dd (ddd)", Width = Ui.S(170), Value = it.Date };
-            var dateRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-            dateRow.Controls.Add(dtDate);
-            dateRow.Controls.Add(Ui.FlowLabel("　担当者"));
-            tStaff = new TextBox { Text = it.Staff, Width = Ui.S(150), Margin = new Padding(0, Ui.S(3), 0, 0) };
-            dateRow.Controls.Add(tStaff);
-            Ui.AddRow(t, "対応日 *", dateRow);
-
-            tInquiry = Ui.AddText(t, "問い合わせ内容", it.Inquiry, 34);
-            tResponse = Ui.AddText(t, "対応内容", it.Response, 33);
-            tNext = Ui.AddText(t, "次回確認内容", it.NextAction, 33);
-
-            dtNext = new DateTimePicker
-            {
-                Format = DateTimePickerFormat.Custom, CustomFormat = "yyyy/MM/dd (ddd)", Width = Ui.S(170),
-                ShowCheckBox = true, Value = it.NextDate ?? DateTime.Today.AddDays(7)
-            };
-            dtNext.Checked = it.NextDate.HasValue;
-            var nextRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
-            nextRow.Controls.Add(dtNext);
-            nextRow.Controls.Add(QuickBtn("+3日", 3));
-            nextRow.Controls.Add(QuickBtn("+1週", 7));
-            nextRow.Controls.Add(QuickBtn("+1か月", 30));
-            chkDone = new CheckBox { Text = "完了（フォロー不要）", AutoSize = true, Checked = it.Done, Margin = new Padding(Ui.S(12), Ui.S(7), 0, 0) };
-            nextRow.Controls.Add(chkDone);
-            Ui.AddRow(t, "次回確認日", nextRow);
-
-            Controls.Add(t);
-            Controls.Add(head);
-            Controls.Add(Ui.OkCancel(this, "保存", OnOk));
-            Shown += delegate { (isNew ? (Control)tInquiry : tResponse).Focus(); };
-        }
-
-        Button QuickBtn(string text, int days)
-        {
-            var b = Ui.Btn(text, delegate { dtNext.Value = dtDate.Value.Date.AddDays(days); dtNext.Checked = true; });
-            b.MinimumSize = new Size(Ui.S(56), Ui.S(28));
-            b.Margin = new Padding(Ui.S(6), Ui.S(1), 0, 0);
-            return b;
-        }
-
-        void OnOk(object sender, EventArgs e)
-        {
-            if (tInquiry.Text.Trim().Length == 0 && tResponse.Text.Trim().Length == 0)
-            {
-                Ui.Warn(this, "問い合わせ内容・対応内容のどちらかを入力してください。");
-                tInquiry.Focus();
-                return;
-            }
-            Func<string, string> clean = s => s.Replace("\r\n", "\n").Trim();
-            Result = new Interaction
-            {
-                Date = dtDate.Value.Date, Staff = tStaff.Text.Trim(), Inquiry = clean(tInquiry.Text),
-                Response = clean(tResponse.Text), NextAction = clean(tNext.Text),
-                NextDate = dtNext.Checked ? dtNext.Value.Date : (DateTime?)null, Done = chkDone.Checked
-            };
-            DialogResult = DialogResult.OK;
-        }
-    }
-
     /// <summary>CSV・タブ区切りテキストの取り込み（ファイル / 貼り付け / 直接入力）とプレビュー</summary>
     public class ImportForm : Form
     {
@@ -322,18 +241,13 @@ namespace CrmDemo
             {
                 Dock = DockStyle.Top, AutoSize = false, Height = Ui.S(88), Tag = "sub",
                 Text = "CSV（カンマ区切り）や、Excelからコピーしたタブ区切りのテキストを下の欄に貼り付けるか直接入力してください。ファイルのドラッグ＆ドロップも使えます。\r\n" +
-                       "1行目が見出しなら列名で自動判別します（顧客名, 会社名, 電話番号, メール, 住所, 備考, 対応日, 問い合わせ内容, 対応内容, 次回確認内容, 次回確認日, 担当者, 状態）。\r\n" +
-                       "見出しがない場合は「顧客名,会社名,電話番号,メール,対応日,問い合わせ内容,対応内容,次回確認内容」の順とみなします。同じ顧客名＋会社名は同じ顧客として履歴を追加し、同じ内容の履歴は重複として取り込みません。"
+                       "1行目が見出しなら、顧客の項目（顧客名, 会社名, 電話番号, メール, 住所, 備考）と、フィールド設定の表示名・変数名で自動判別します。\r\n" +
+                       "見出しがない場合は「顧客名,会社名,電話番号,メール」と一覧に表示している項目の順とみなします。顧客IDの列があればその顧客、ケース番号の列があればそのケースを更新します（エクスポートしたCSVを編集して戻せます）。"
             };
 
             var tools = Ui.Flow();
             tools.Controls.Add(Ui.Btn("ファイルを開く...", OpenFile));
             tools.Controls.Add(Ui.Btn("サンプルCSVを入力", delegate { txt.Text = Samples.Csv(); }));
-            tools.Controls.Add(Ui.Btn("入力例（見出しなし）", delegate
-            {
-                txt.Text = "中村 翔,株式会社サンプル物産,03-5555-0101,nakamura@sample-bussan.example," + TextUtil.Date(DateTime.Today) +
-                           ",サービス内容を知りたい,概要を電話で説明し資料を送付,資料到着の確認\r\n";
-            }));
             tools.Controls.Add(Ui.Btn("クリア", delegate { txt.Clear(); }));
             chkDefault = new CheckBox
             {
@@ -358,8 +272,12 @@ namespace CrmDemo
             timer.Tick += delegate { timer.Stop(); UpdatePreview(); };
 
             grid = Ui.Grid();
-            foreach (var h in new[] { "行", "顧客名", "会社名", "対応日", "問い合わせ内容", "対応内容", "次回確認内容", "判定" })
-                Ui.Col(grid, h, h == "行" ? 30 : (h.EndsWith("内容") ? 140 : (h == "判定" ? 150 : 80)), 40);
+            Ui.Col(grid, "行", 30, 40);
+            Ui.Col(grid, "顧客名", 80, 70);
+            Ui.Col(grid, "会社名", 80, 70);
+            Ui.Col(grid, "ケース番号", 46, 80);
+            Ui.Col(grid, "ケースの値", 200, 120);
+            Ui.Col(grid, "判定", 140, 90);
 
             var split = new SplitContainer { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal };
             var lblText = new Label { Text = "取り込むテキスト", Dock = DockStyle.Top, Font = Ui.BoldFont, Height = Ui.S(22) };
@@ -398,18 +316,28 @@ namespace CrmDemo
 
         int? DefaultId { get { return chkDefault.Checked && current != null ? current.Id : (int?)null; } }
 
+        string ValueSummary(ImportRow r)
+        {
+            var data = store.Data;
+            return string.Join(" / ", r.Values.Where(v => !string.IsNullOrWhiteSpace(v.Value))
+                .Select(v =>
+                {
+                    var f = data.FieldByApi(v.Key);
+                    return (f == null ? v.Key : f.Label) + ": " + TextUtil.OneLine(v.Value);
+                }).ToArray());
+        }
+
         void UpdatePreview()
         {
-            parsed = Importer.Parse(txt.Text);
+            parsed = Importer.Parse(txt.Text, store.Data);
             preview = Importer.Apply(store.Data.Clone(), parsed.Rows, DefaultId);
             grid.Rows.Clear();
             for (int i = 0; i < parsed.Rows.Count; i++)
             {
                 var r = parsed.Rows[i];
                 string st = preview.RowStatus[i];
-                int idx = grid.Rows.Add(r.LineNo.ToString(), r.Name, r.Company, r.DateText, TextUtil.OneLine(r.Inquiry),
-                    TextUtil.OneLine(r.Response), TextUtil.OneLine(r.NextAction), st);
-                var cell = grid.Rows[idx].Cells[7];
+                int idx = grid.Rows.Add(r.LineNo.ToString(), r.Name, r.Company, r.CaseNumber, ValueSummary(r), st);
+                var cell = grid.Rows[idx].Cells[5];
                 if (st.StartsWith("エラー")) { cell.Style.ForeColor = Theme.Danger; cell.Style.Font = Ui.BoldFont; }
                 else if (st.Contains("重複")) grid.Rows[idx].DefaultCellStyle.ForeColor = Theme.Muted;
                 else if (st.StartsWith("新規")) cell.Style.ForeColor = Theme.Success;
